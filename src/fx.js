@@ -109,7 +109,9 @@ const SESSION_LOOK = {
 export function sessionFlames(frame, states, o = {}) {
   const list = states.slice(0, 6);
   if (!list.length) return "";
-  const { y0 = 141, x0 = 8, x1 = 136, maxH = 34 } = o;
+  // The row stays inside the straight part of the bottom edge (x 20..124), else the
+  // frame's rounded corners clip the outer flames' bases.
+  const { y0 = 141, x0 = 20, x1 = 124, maxH = 34 } = o;
   const step = Math.min(30, (x1 - x0) / list.length);
   const startX = 72 - (step * list.length) / 2;
   let out = "";

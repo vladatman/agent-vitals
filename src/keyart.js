@@ -283,6 +283,7 @@ function bigCountKey(title, count, sub, subColor, animPhase = null, tint = null,
     ${header(title)}
     ${dots}
     ${line(72, 97, 118, 60, 700, count > 0 ? C.text : C.dim, count)}
+    ${fx && sub ? `<rect x="22" y="117" width="100" height="14" rx="7" fill="${C.bg}" opacity="0.6"/>` : ""}
     ${foot(sub, subColor ?? C.dim)}`);
 }
 
@@ -312,7 +313,9 @@ function statusFire(st, fx) {
   if (!fx || !sf) return "";
   const heat = Math.min(sf.cap ?? 1, Math.max(sf.floor, fx.heat ?? sf.floor));
   const blocked = !sf.cap;
-  return fireBed(fx.frame, heat, sf.pal, { maxH: blocked ? 82 : 52, op: blocked ? 0.62 : 0.5 }) +
+  // Capped at 66px / 0.5 so the 13px detail line at y=127 stays legible on the device;
+  // 82px / 0.62 buried "permission · 2m" under the tongues (reviewed on the frame strip).
+  return fireBed(fx.frame, heat, sf.pal, { maxH: blocked ? 66 : 48, op: blocked ? 0.5 : 0.45 }) +
     (blocked ? embers(fx.frame, heat, sf.pal[2], { yBase: 130, rise: 95 }) : "");
 }
 function statusKey(name, st, count, detail = "", tag = "", phase = null, fx = null) {
@@ -326,7 +329,8 @@ function statusKey(name, st, count, detail = "", tag = "", phase = null, fx = nu
     ${count > 1 ? badge(count, look.col) : corner(tag)}
     ${line(72, 78, 128, 25, 700, st === "none" ? C.dim : C.text, shown)}
     ${line(72, 104, 130, 17, 700, look.col, look.label)}
-    ${detail ? line(72, 127, 132, 13, 400, C.dim, detail) : ""}`);
+    ${detail && fx ? `<rect x="22" y="117" width="100" height="14" rx="7" fill="${C.bg}" opacity="0.55"/>` : ""}
+    ${detail ? line(72, 127, 132, 13, 400, fx ? C.text : C.dim, detail) : ""}`);
 }
 
 function fmtNum(n) {

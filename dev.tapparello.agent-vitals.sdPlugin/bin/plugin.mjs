@@ -4479,6 +4479,99 @@ function startHookServer({ port, secret, onRequest, onDrop, log: log2 = () => {
 // src/view.js
 import path2 from "node:path";
 
+// src/fx.js
+var FX_FRAMES = 24;
+var TAU = Math.PI * 2;
+var f1 = (n) => String(Math.round(n * 10) / 10);
+var clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+var wave = (frame, k, ph = 0) => Math.sin(frame % FX_FRAMES / FX_FRAMES * TAU * k + ph);
+var FIRE = {
+  warn: ["#dc2626", "#f97316", "#fde68a"],
+  ask: ["#7e22ce", "#a855f7", "#f3e8ff"],
+  info: ["#1d4ed8", "#60a5fa", "#dbeafe"],
+  ok: ["#15803d", "#4ade80", "#dcfce7"],
+  bad: ["#991b1b", "#f87171", "#fee2e2"],
+  dim: ["#3a3745", "#6b6679", "#9b96a8"]
+};
+function tongue(cx, y0, w, h, sway, col, op) {
+  const tip = cx + sway;
+  const mid = cx + sway * 0.5;
+  return `<path d="M${f1(cx - w / 2)} ${f1(y0)} C${f1(cx - w / 2)} ${f1(y0 - h * 0.35)} ${f1(mid - w * 0.22)} ${f1(y0 - h * 0.62)} ${f1(tip)} ${f1(y0 - h)} C${f1(mid + w * 0.22)} ${f1(y0 - h * 0.62)} ${f1(cx + w / 2)} ${f1(y0 - h * 0.35)} ${f1(cx + w / 2)} ${f1(y0)} Z" fill="${col}" opacity="${op.toFixed(2)}"/>`;
+}
+function fireBed(frame, heat, pal, o = {}) {
+  const { y0 = 144, x0 = 6, x1 = 138, n = 6, maxH = 76, op = 0.6 } = o;
+  const hh = clamp(heat, 0.08, 1);
+  const step = (x1 - x0) / n;
+  let out = "";
+  for (let layer = 0; layer < 3; layer++) {
+    for (let i = 0; i < n; i++) {
+      const cx = x0 + step * (i + 0.5);
+      const ph = i * 1.7 + layer * 0.9;
+      const env = 0.62 + 0.38 * Math.sin(Math.PI * (i + 0.5) / n);
+      const flick = 0.62 + 0.24 * wave(frame, 2, ph) + 0.14 * wave(frame, 3, ph * 2);
+      const h = maxH * hh * env * flick * [1, 0.74, 0.46][layer];
+      const w = step * [1.55, 1.05, 0.55][layer];
+      const sway = step * 0.28 * wave(frame, 1, ph) * (0.6 + 0.4 * hh);
+      out += tongue(cx, y0, w, h, sway, pal[layer], op * [0.7, 0.85, 1][layer] * (0.5 + 0.5 * hh));
+    }
+  }
+  return out;
+}
+function embers(frame, heat, col, o = {}) {
+  const { x0 = 10, x1 = 134, yBase = 140, rise = 90, count = 9 } = o;
+  const lit = Math.max(1, Math.round(count * clamp(heat, 0, 1)));
+  let out = "";
+  for (let i = 0; i < lit; i++) {
+    const p = ((frame + i * FX_FRAMES / count) % FX_FRAMES + FX_FRAMES) % FX_FRAMES / FX_FRAMES;
+    const bx = x0 + i * 53 % 100 / 100 * (x1 - x0);
+    const x = bx + 7 * Math.sin(p * TAU + i);
+    const y = yBase - p * rise * (0.7 + 0.3 * (i * 37 % 100 / 100));
+    const r = 0.8 + 2.2 * (1 - p);
+    out += `<circle cx="${f1(x)}" cy="${f1(y)}" r="${f1(r)}" fill="${col}" opacity="${((1 - p) * 0.9).toFixed(2)}"/>`;
+  }
+  return out;
+}
+function barFire(frame, pct, fillW, pal) {
+  const k = clamp((pct - 50) / 50, 0, 1);
+  if (k <= 0) return "";
+  const n = 5;
+  const span = Math.min(fillW, 64);
+  const xEnd = 12 + fillW;
+  const x0 = xEnd - span;
+  const step = span / n;
+  let out = "";
+  for (let layer = 0; layer < 2; layer++) {
+    for (let i = 0; i < n; i++) {
+      const cx = x0 + step * (i + 0.5);
+      const ph = i * 1.9 + layer;
+      const flick = 0.65 + 0.35 * wave(frame, 2, ph);
+      const h = (7 + 20 * k) * flick * (layer ? 0.55 : 1) * (0.6 + 0.4 * ((i + 1) / n));
+      out += tongue(cx, 94.5, step * (layer ? 0.9 : 1.5), h, step * 0.3 * wave(frame, 1, ph), pal[layer + 1], 0.9 - layer * 0.1);
+    }
+  }
+  return out;
+}
+var SESSION_LOOK = {
+  "needs-approval": { pal: FIRE.warn, heat: 1 },
+  "input-needed": { pal: FIRE.ask, heat: 1 },
+  working: { pal: FIRE.info, heat: 0.7 },
+  finished: { pal: FIRE.ok, heat: 0.4 },
+  idle: { pal: FIRE.dim, heat: 0.12 }
+};
+function sessionFlames(frame, states, o = {}) {
+  const list = states.slice(0, 6);
+  if (!list.length) return "";
+  const { y0 = 141, x0 = 20, x1 = 124, maxH = 34 } = o;
+  const step = Math.min(30, (x1 - x0) / list.length);
+  const startX = 72 - step * list.length / 2;
+  let out = "";
+  list.forEach((st, i) => {
+    const look = SESSION_LOOK[st] ?? SESSION_LOOK.idle;
+    out += fireBed(frame + i * 5, look.heat, look.pal, { y0, x0: startX + step * i, x1: startX + step * (i + 1), n: 1, maxH, op: 0.85 });
+  });
+  return out;
+}
+
 // src/keyart.js
 var C = {
   bg: "#16151c",
@@ -4601,17 +4694,23 @@ function usageMeterKey(head, big, sub, isCost) {
     ${line(72, 88, 128, 42, 700, none ? C.dim : C.text, big, "middle", "", 20)}
     ${foot(sub)}`);
 }
-function gaugeKey(label, pct, sub, pulsePhase = null) {
+function gaugeKey(label, pct, sub, pulsePhase = null, fx = null) {
   const has = typeof pct === "number" && isFinite(pct);
   const p = has ? Math.max(0, Math.min(100, pct)) : 0;
   const col = has ? pctColor(p) : C.dim;
-  const pulse = pulsePhase == null ? "" : `<rect x="4" y="4" width="136" height="136" rx="16" fill="none" stroke="${C.bad}" stroke-width="6" opacity="${[0.2, 0.55, 0.95][pulsePhase % 3]}"/>`;
+  const pal = p >= 85 ? FIRE.bad : p >= 60 ? FIRE.warn : FIRE.ok;
+  const burning = fx && has && p >= 90;
+  const pulse = fx || pulsePhase == null ? "" : `<rect x="4" y="4" width="136" height="136" rx="16" fill="none" stroke="${C.bad}" stroke-width="6" opacity="${[0.2, 0.55, 0.95][pulsePhase % 3]}"/>`;
+  const fillW = Math.max(7, 120 * p / 100);
   return svgWrap(`
     ${pulse}
+    ${burning ? fireBed(fx.frame, 0.4 + 0.6 * ((p - 90) / 10), FIRE.bad, { maxH: 64, op: 0.5 }) : ""}
     ${header(label)}
     ${line(72, 82, 128, has ? 44 : 32, 700, col, has ? Math.round(p) + "%" : "--")}
     <rect x="12" y="94" width="120" height="10" rx="5" fill="${C.track}"/>
-    ${has ? `<rect x="12" y="94" width="${Math.max(7, 120 * p / 100).toFixed(1)}" height="10" rx="5" fill="${col}"/>` : ""}
+    ${has ? `<rect x="12" y="94" width="${fillW.toFixed(1)}" height="10" rx="5" fill="${col}"/>` : ""}
+    ${fx && has ? barFire(fx.frame, p, fillW, pal) : ""}
+    ${burning ? embers(fx.frame, 0.8, C.warn, { yBase: 100, rise: 70, count: 8 }) : ""}
     ${foot(sub)}`);
 }
 function burnKey(tokensHour, sub) {
@@ -4626,13 +4725,16 @@ function linesKey(title, rows) {
   const rowSvg = rows.map((r, i) => line(12, 64 + i * 30, 122, 21, r.big ? 700 : 600, r.color ?? C.text, r.text, "start")).join("");
   return svgWrap(`${header(title)}${rowSvg}`);
 }
-function bigCountKey(title, count, sub, subColor, animPhase2 = null, tint = null, strong = false) {
-  const dots = animPhase2 == null ? "" : [0, 1, 2].map((i) => `<circle cx="128" cy="${58 + i * 15}" r="${i === animPhase2 ? 4.5 : 3}" fill="${i === animPhase2 ? tint ?? C.info : C.track}"/>`).join("");
+function bigCountKey(title, count, sub, subColor, animPhase2 = null, tint = null, strong = false, fx = null) {
+  const dots = fx || animPhase2 == null ? "" : [0, 1, 2].map((i) => `<circle cx="128" cy="${58 + i * 15}" r="${i === animPhase2 ? 4.5 : 3}" fill="${i === animPhase2 ? tint ?? C.info : C.track}"/>`).join("");
+  const flames = fx ? sessionFlames(fx.frame, fx.states ?? []) : "";
   return svgWrap(`
     ${tintFrame(tint, strong)}
+    ${flames}
     ${header(title)}
     ${dots}
     ${line(72, 97, 118, 60, 700, count > 0 ? C.text : C.dim, count)}
+    ${fx && sub ? `<rect x="22" y="117" width="100" height="14" rx="7" fill="${C.bg}" opacity="0.6"/>` : ""}
     ${foot(sub, subColor ?? C.dim)}`);
 }
 var STATUS_LOOK = {
@@ -4648,15 +4750,30 @@ var STATUS_LOOK = {
   // couldn't stat. Saying "no status" beats inventing "Idle".
   unknown: { label: "no status", col: C.dim }
 };
-function statusKey(name, st, count, detail = "", tag = "", phase = null) {
+var STATUS_FIRE = {
+  "needs-approval": { pal: FIRE.warn, floor: 0.35 },
+  "input-needed": { pal: FIRE.ask, floor: 0.35 },
+  working: { pal: FIRE.info, floor: 0.3, cap: 0.45 },
+  finished: { pal: FIRE.ok, floor: 0.25, cap: 0.3 }
+};
+function statusFire(st, fx) {
+  const sf = STATUS_FIRE[st];
+  if (!fx || !sf) return "";
+  const heat = Math.min(sf.cap ?? 1, Math.max(sf.floor, fx.heat ?? sf.floor));
+  const blocked = !sf.cap;
+  return fireBed(fx.frame, heat, sf.pal, { maxH: blocked ? 66 : 48, op: blocked ? 0.5 : 0.45 }) + (blocked ? embers(fx.frame, heat, sf.pal[2], { yBase: 130, rise: 95 }) : "");
+}
+function statusKey(name, st, count, detail = "", tag = "", phase = null, fx = null) {
   const look = STATUS_LOOK[st] ?? STATUS_LOOK.none;
   const shown = String(name || "CLAUDE").slice(0, 11);
   return svgWrap(`
-    ${tintFrame(look.col, !!look.strong, phase)}
+    ${tintFrame(look.col, !!look.strong, fx ? null : phase)}
+    ${statusFire(st, fx)}
     ${count > 1 ? badge(count, look.col) : corner(tag)}
     ${line(72, 78, 128, 25, 700, st === "none" ? C.dim : C.text, shown)}
     ${line(72, 104, 130, 17, 700, look.col, look.label)}
-    ${detail ? line(72, 127, 132, 13, 400, C.dim, detail) : ""}`);
+    ${detail && fx ? `<rect x="22" y="117" width="100" height="14" rx="7" fill="${C.bg}" opacity="0.55"/>` : ""}
+    ${detail ? line(72, 127, 132, 13, 400, fx ? C.text : C.dim, detail) : ""}`);
 }
 function fmtNum(n) {
   if (n == null) return "--";
@@ -4741,8 +4858,10 @@ function approveKey(kind, req, o = {}) {
     const n = Math.min(4, bodyLines.length);
     const [top, step] = [[92, 0], [78, 26], [68, 22], [62, 18]][n - 1] ?? [92, 0];
     const body = bodyLines.slice(0, n).map((l, i) => line(72, top + i * step, RULE_W, l.max ?? 22, 700, l.col ?? C.text, l.t)).join("");
+    const spark = o.fx && mult2 === 1 ? embers(o.fx.frame, Math.min(1, 0.45 + 0.2 * (o.depth ?? 1)), col2, { yBase: 132, rise: 80, count: 8 }) : "";
     return svgWrap(`
-      ${tintFrame(col2, mult2 === 1, o.phase ?? null)}
+      ${tintFrame(col2, mult2 === 1, o.fx ? null : o.phase ?? null)}
+      ${spark}
       ${band[look.weight](col2, mult2)}
       ${actionHead(look.glyphName, wordOverride ?? look.word, onBand)}
       ${cornerSvg2}
@@ -4770,6 +4889,11 @@ function approveKey(kind, req, o = {}) {
 // src/view.js
 var pendKindOf = (state2, s) => state2.pending?.get(s?.sessionId)?.kind ?? null;
 var PULSE_MS = 12e4;
+var HEAT_FULL_MS = 18e4;
+function waitHeat(since, now) {
+  if (!since) return 0.35;
+  return Math.max(0.35, Math.min(1, 0.35 + 0.65 * (now - since) / HEAT_FULL_MS));
+}
 function fmtReset(iso, now = Date.now()) {
   if (!iso) return "";
   const ms = new Date(iso).getTime() - now;
@@ -4788,7 +4912,7 @@ function gaugeMode(state2, kind, now) {
   const hasLocal = !!(win && state2.usageMeter?.[win]);
   return gaugeSource({ usage: state2.usage, usageErr: state2.usageErr, usageAt: state2.usageAt, now }, hasLocal);
 }
-function localGauge(header2, agg, budget, view = "cost", animPhase2 = null) {
+function localGauge(header2, agg, budget, view = "cost", animPhase2 = null, fx = null) {
   if (!agg) return usageMeterKey(header2, "--", "no data yet", true);
   if (view === "tokens") {
     return usageMeterKey(header2, fmtNum(agg.tokens), `${fmtNum(agg.in)} in \xB7 ${fmtNum(agg.out)} out`, false);
@@ -4796,7 +4920,7 @@ function localGauge(header2, agg, budget, view = "cost", animPhase2 = null) {
   const pct = budgetPct(agg.cost, budget);
   if (pct == null) return usageMeterKey(header2, "$" + agg.cost.toFixed(2), "est", true);
   const over = pct > 100 ? " \xB7 " + Math.round(pct) + "%" : "";
-  return gaugeKey(header2, pct, `$${Math.round(agg.cost)} / $${Math.round(Number(budget))}${over}`, pct >= 90 ? animPhase2 : null);
+  return gaugeKey(header2, pct, `$${Math.round(agg.cost)} / $${Math.round(Number(budget))}${over}`, pct >= 90 ? animPhase2 : null, fx);
 }
 function modelList(state2, mode) {
   if (mode === "local") return state2.usageMeterModels ?? [];
@@ -4831,6 +4955,36 @@ function sessionEta(state2, now) {
   const hh = Math.floor(msLeft / 36e5), mm = Math.round(msLeft % 36e5 / 6e4);
   return hh > 0 ? `cap in ~${hh}h ${mm}m` : `cap in ~${mm}m`;
 }
+var FX_GAUGE_PCT = 50;
+var APPROVE_KINDS = ["approve-allow", "approve-always", "approve-deny"];
+function animatingKinds(state2, now, budgetFor = () => void 0) {
+  const kinds = [];
+  for (const kind of Object.keys(GAUGE_WINDOW)) {
+    const mode = gaugeMode(state2, kind, now);
+    let pct = null;
+    if (mode === "subscription") {
+      const b = kind === "usage-session" ? state2.usage?.fiveHour : kind === "usage-weekly" ? state2.usage?.weekly : (state2.usage?.models ?? [])[0];
+      pct = b?.pct ?? null;
+    } else if (mode === "local") {
+      const agg = kind === "usage-model" ? (state2.usageMeterModels ?? [])[0] : state2.usageMeter?.[GAUGE_WINDOW[kind]];
+      pct = agg ? budgetPct(agg.cost, budgetFor(kind)) : null;
+    }
+    if (pct != null && pct >= FX_GAUGE_PCT) kinds.push(kind);
+  }
+  const st = (s) => sessionState(s, now, state2.activity?.get(s.sessionId) ?? null, pendKindOf(state2, s));
+  const working = (state2.sessions ?? []).some((s) => st(s) === "working");
+  const blocked = blockedSessions(state2.sessions, now, state2.activity, state2.pending);
+  const freshBlocked = blocked.some((b) => {
+    const since = b.statusUpdatedAt ?? state2.pending?.get(b.sessionId)?.since ?? null;
+    return !since || now - since < PULSE_MS;
+  });
+  if (working || blocked.length) kinds.push("sessions");
+  if (working || freshBlocked) kinds.push("approver-status");
+  if (freshBlocked) kinds.push("approver-waiting");
+  const req = approvable(state2.approveQueue);
+  if (req && now - req.receivedAt < PULSE_MS) kinds.push(...APPROVE_KINDS);
+  return kinds;
+}
 function viewFor(kind, env) {
   const {
     state: state2,
@@ -4843,25 +4997,27 @@ function viewFor(kind, env) {
     focus = null,
     autoSlot: autoSlot2 = 0,
     authFlagged: authFlagged2 = false,
-    defaultCodeDir = ""
+    defaultCodeDir = "",
+    frame = null
   } = env;
+  const FX = frame != null ? { frame } : null;
   const img = (image) => ({ image });
   switch (kind) {
     case "usage-session": {
       const mode = gaugeMode(state2, "usage-session", now);
-      if (mode === "local") return img(localGauge("LAST 5H", state2.usageMeter?.["5h"], settings.budget, usageViewMode, animPhase2));
+      if (mode === "local") return img(localGauge("LAST 5H", state2.usageMeter?.["5h"], settings.budget, usageViewMode, animPhase2, FX));
       if (mode !== "subscription") return img(gaugeKey("SESSION 5H", null, mode === "throttled" ? "throttled" : mode === "error" ? "sign in?" : "no data"));
       const b = state2.usage?.fiveHour;
-      return img(gaugeKey("SESSION 5H", b?.pct ?? null, b ? fmtReset(b.resetsAt, now) : "no data", b?.pct >= 90 ? animPhase2 : null));
+      return img(gaugeKey("SESSION 5H", b?.pct ?? null, b ? fmtReset(b.resetsAt, now) : "no data", b?.pct >= 90 ? animPhase2 : null, FX));
     }
     case "usage-weekly": {
       const mode = gaugeMode(state2, "usage-weekly", now);
-      if (mode === "local") return img(localGauge("LAST 7D", state2.usageMeter?.["7day"], settings.budget, usageViewMode, animPhase2));
+      if (mode === "local") return img(localGauge("LAST 7D", state2.usageMeter?.["7day"], settings.budget, usageViewMode, animPhase2, FX));
       if (mode !== "subscription") return img(gaugeKey("WEEKLY", null, mode === "throttled" ? "throttled" : mode === "error" ? "sign in?" : "no data"));
       const b = state2.usage?.weekly;
       const u = state2.usage;
       const sub = u?.scopedPct != null && u.scopedName ? `${u.scopedName} ${Math.round(u.scopedPct)}%` : u?.weeklyOpus?.pct != null ? `opus ${Math.round(u.weeklyOpus.pct)}%` : b ? fmtReset(b.resetsAt, now) : "no data";
-      return img(gaugeKey("WEEKLY", b?.pct ?? null, sub, b?.pct >= 90 ? animPhase2 : null));
+      return img(gaugeKey("WEEKLY", b?.pct ?? null, sub, b?.pct >= 90 ? animPhase2 : null, FX));
     }
     case "usage-model": {
       const mmode = gaugeMode(state2, "usage-model", now);
@@ -4876,9 +5032,9 @@ function viewFor(kind, env) {
       const more = list.length > 1 ? ` ${i + 1}/${list.length}` : "";
       if (!pick) return img(usageMeterKey(head_, "--", mmode === "local" ? "no data yet" : "no data", true));
       if (mmode === "local") {
-        return img(localGauge(head_ + more, pick, settings.budget, usageViewMode, animPhase2));
+        return img(localGauge(head_ + more, pick, settings.budget, usageViewMode, animPhase2, FX));
       }
-      return img(gaugeKey(head_ + more, pick.pct ?? null, pick.resetsAt ? fmtReset(pick.resetsAt, now) : "no data", pick.pct >= 90 ? animPhase2 : null));
+      return img(gaugeKey(head_ + more, pick.pct ?? null, pick.resetsAt ? fmtReset(pick.resetsAt, now) : "no data", pick.pct >= 90 ? animPhase2 : null, FX));
     }
     case "burn-rate":
       return img(burnKey(state2.burn?.tokensHour ?? null, sessionEta(state2, now)));
@@ -4931,7 +5087,16 @@ function viewFor(kind, env) {
       const busy = state2.sessions.filter((s) => sessionState(s, now, state2.activity.get(s.sessionId) ?? null, pendKindOf(state2, s)) === "working").length;
       const sub = blocked > 0 ? `${blocked} needs you` : busy > 0 ? `${busy} working` : n > 0 ? "all idle" : "none running";
       const subCol = blocked > 0 ? C.warn : busy > 0 ? C.info : C.dim;
-      return img(bigCountKey("CLAUDE CODE", n, sub, subCol, busy > 0 ? animPhase2 : null, blocked > 0 ? C.warn : busy > 0 ? C.info : null, blocked > 0));
+      return img(bigCountKey(
+        "CLAUDE CODE",
+        n,
+        sub,
+        subCol,
+        busy > 0 ? animPhase2 : null,
+        blocked > 0 ? C.warn : busy > 0 ? C.info : null,
+        blocked > 0,
+        FX && n > 0 ? { frame, states: state2.sessions.map((s) => sessionState(s, now, state2.activity.get(s.sessionId) ?? null, pendKindOf(state2, s))) } : null
+      ));
     }
     case "today": {
       const t = state2.today;
@@ -4970,7 +5135,15 @@ function viewFor(kind, env) {
       }
       const blockedNow = entry.state === "needs-approval" || entry.state === "input-needed";
       const fresh = blockedNow && (!entry.waitingSince || now - entry.waitingSince < PULSE_MS);
-      return img(statusKey(name, entry.state, explicit ? resolved.count : 1, detail, entry.where, fresh ? animPhase2 : null));
+      return img(statusKey(
+        name,
+        entry.state,
+        explicit ? resolved.count : 1,
+        detail,
+        entry.where,
+        fresh ? animPhase2 : null,
+        FX ? { frame: !blockedNow || fresh ? frame : 0, heat: blockedNow ? waitHeat(entry.waitingSince, now) : 0.3 } : null
+      ));
     }
     case "approver-waiting": {
       const blocked = blockedSessions(state2.sessions, now, state2.activity, state2.pending);
@@ -4986,7 +5159,15 @@ function viewFor(kind, env) {
       const waited = since ? fmtShort(now - since) : "";
       const why = shortWait(b.waitingFor ?? p?.reason ?? "") || "needs you";
       const fresh = !since || now - since < PULSE_MS;
-      return img(statusKey(path2.basename(b.cwd ?? "") || "claude", st, blocked.length, why + (waited ? " \xB7 " + waited : ""), sessionWhere(b), fresh ? animPhase2 : null));
+      return img(statusKey(
+        path2.basename(b.cwd ?? "") || "claude",
+        st,
+        blocked.length,
+        why + (waited ? " \xB7 " + waited : ""),
+        sessionWhere(b),
+        fresh ? animPhase2 : null,
+        FX ? { frame: fresh ? frame : 0, heat: waitHeat(since, now) } : null
+      ));
     }
     case "approve-allow":
     case "approve-always":
@@ -5001,6 +5182,7 @@ function viewFor(kind, env) {
           err,
           depth: approvableDepth(state2.approveQueue),
           phase: fresh ? animPhase2 : null,
+          fx: fresh && FX ? FX : null,
           denied: kind === "approve-always" && req ? denyBlock(state2.denies, req, now) : null
         }),
         // What this key is PAINTING. The press guard compares against it, so a press
@@ -5309,16 +5491,16 @@ async function pollSessions() {
     log("sessions poll failed:", String(e));
   }
 }
-var APPROVE_KINDS = ["approve-allow", "approve-always", "approve-deny"];
+var APPROVE_KINDS2 = ["approve-allow", "approve-always", "approve-deny"];
 var HOLD_MS = () => (Number(state.globalSettings.hookHoldS) || HOLD_S_DEFAULT) * 1e3;
 var TIMEOUT_PAD_S = 3;
 var approveSeq = 0;
 var hookServer = null;
-var renderApproveAll = () => renderAll(APPROVE_KINDS);
-var hasApproveKey = () => [...views.values()].some((v) => APPROVE_KINDS.includes(v.kind));
+var renderApproveAll = () => renderAll(APPROVE_KINDS2);
+var hasApproveKey = () => [...views.values()].some((v) => APPROVE_KINDS2.includes(v.kind));
 function queueChanged() {
   state.pending = pendingBySession(state.approveQueue);
-  renderAll([...APPROVE_KINDS, "approver-status", "approver-waiting"]);
+  renderAll([...APPROVE_KINDS2, "approver-status", "approver-waiting"]);
 }
 function authFlagged() {
   const hits = hookServer?.stats.badPathHits;
@@ -5658,6 +5840,10 @@ var shownReq = /* @__PURE__ */ new Map();
 var shownRule = /* @__PURE__ */ new Map();
 var ws = null;
 var animPhase = 0;
+var FX_ON = process.env.AGENT_VITALS_FX !== "0";
+var FX_FPS = 8;
+var FX_MAX_IMAGES_PER_S = 48;
+var fxFrame = 0;
 var lastSessionSig = "";
 function send(obj) {
   if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj));
@@ -5674,6 +5860,7 @@ function render(context, kind) {
     settings: v?.settings ?? {},
     now: Date.now(),
     animPhase,
+    frame: FX_ON ? fxFrame : null,
     usageViewMode: usageView.get(context) ?? "cost",
     pressedModelIdx: modelIdx.get(context) ?? null,
     cycleIdx: cy && cy.idx >= 0 ? cy.idx : -1,
@@ -6248,7 +6435,7 @@ if (process.argv.includes("--selftest")) {
       render(context, kindOf(action));
       if (kindOf(action) === "usage-meter" || GAUGE_WINDOW[kindOf(action)]) pollUsageMeter();
     } else if (event === "willDisappear") {
-      const wasApproveKey = APPROVE_KINDS.includes(views.get(context)?.kind);
+      const wasApproveKey = APPROVE_KINDS2.includes(views.get(context)?.kind);
       views.delete(context);
       cycle.delete(context);
       focusIdx.delete(context);
@@ -6318,14 +6505,30 @@ if (process.argv.includes("--selftest")) {
     if (state.approveQueue.length) {
       const dead = expiredIds(state.approveQueue, Date.now(), HOLD_MS());
       if (dead.length) answerAndDrop(dead, "hold expired");
-      if (approvableDepth(state.approveQueue)) kinds.push(...APPROVE_KINDS);
+      if (approvableDepth(state.approveQueue)) kinds.push(...APPROVE_KINDS2);
     }
     if (kinds.length && [...views.values()].some((v) => kinds.includes(v.kind))) renderAll(kinds);
     const expired = [state.usage?.fiveHour, state.usage?.weekly].some((b) => b?.resetsAt && Date.now() - new Date(b.resetsAt).getTime() > 5e3);
     if (expired && !state.usageErr && Date.now() - lastUsageAttempt > 3e4) pollUsage();
   }, 600);
+  if (FX_ON) {
+    let fxTick = 0;
+    const perTick = Math.max(1, Math.floor(FX_MAX_IMAGES_PER_S / FX_FPS));
+    setInterval(() => {
+      fxFrame = (fxFrame + 1) % FX_FRAMES;
+      fxTick++;
+      const now = Date.now();
+      const kinds = animatingKinds(state, now, (k) => [...views.values()].find((v) => v.kind === k)?.settings?.budget);
+      if (!kinds.length) return;
+      const live = [...views.entries()].filter(([, v]) => kinds.includes(v.kind));
+      if (!live.length) return;
+      const every = Math.ceil(live.length / perTick);
+      if (fxTick % every) return;
+      for (const [context, v] of live) render(context, v.kind);
+    }, Math.round(1e3 / FX_FPS));
+  }
   setInterval(() => {
-    renderAll(["usage-session", "usage-weekly", "usage-model", "burn-rate", "approver-status", "approver-waiting", "focus-session", ...APPROVE_KINDS]);
+    renderAll(["usage-session", "usage-weekly", "usage-model", "burn-rate", "approver-status", "approver-waiting", "focus-session", ...APPROVE_KINDS2]);
     if (state.hookErr) ensureHookServer();
   }, 3e4);
 }

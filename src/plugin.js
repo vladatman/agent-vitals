@@ -20,8 +20,9 @@ import {
 } from "./approve.js";
 import { startHookServer, BADPATH_WINDOW_MS, BADPATH_MIN_HITS } from "./hookserver.js";
 import {
-  viewFor, gaugeMode, GAUGE_WINDOW, modelList, modelListIndex, sessionEta, PULSE_MS,
+  viewFor, gaugeMode, GAUGE_WINDOW, modelList, modelListIndex, sessionEta, PULSE_MS, animatingKinds,
 } from "./view.js";
+import { FX_FRAMES } from "./fx.js";
 
 const IS_MAC = process.platform === "darwin";
 
@@ -770,6 +771,17 @@ const shownReq = new Map();  // context -> the approve request id this key last 
 const shownRule = new Map(); // context -> the ALWAYS rule text this key last PAINTED
 let ws = null;
 let animPhase = 0;
+// Fire animation (fx.js). One cycle is FX_FRAMES frames at FX_FPS; every render passes
+// the current frame so the 600 ms ticker, the pollers and the fx ticker all draw the
+// same look, and the fx ticker only adds repaints for the keys that are moving. The
+// whole layer switches off with AGENT_VITALS_FX=0 (every key then draws as before).
+const FX_ON = process.env.AGENT_VITALS_FX !== "0";
+const FX_FPS = 8;
+// setImage pushes a full 144x144 PNG over USB; Stream Deck throttles past ~50/s and
+// drops frames. Above the cap the fx ticker lowers its frame rate for ALL keys
+// evenly rather than letting some keys stutter.
+const FX_MAX_IMAGES_PER_S = 48;
+let fxFrame = 0;
 let lastSessionSig = ""; // previous tick's session signature (see pollSessions)
 
 function send(obj) {
@@ -792,6 +804,7 @@ function render(context, kind) {
     settings: v?.settings ?? {},
     now: Date.now(),
     animPhase,
+    frame: FX_ON ? fxFrame : null,
     usageViewMode: usageView.get(context) ?? "cost",
     pressedModelIdx: modelIdx.get(context) ?? null,
     cycleIdx: cy && cy.idx >= 0 ? cy.idx : -1,
@@ -1480,6 +1493,27 @@ if (process.argv.includes("--selftest")) {
       .some((b) => b?.resetsAt && Date.now() - new Date(b.resetsAt).getTime() > 5000);
     if (expired && !state.usageErr && Date.now() - lastUsageAttempt > 30_000) pollUsage();
   }, 600);
+  // Fire ticker: 8 fps, only the keys with something moving (see animatingKinds).
+  // Independent of the 600 ms ticker above, which stays as the fallback and still
+  // repaints its kinds (with the current frame, so the two never disagree).
+  if (FX_ON) {
+    let fxTick = 0;
+    const perTick = Math.max(1, Math.floor(FX_MAX_IMAGES_PER_S / FX_FPS));
+    setInterval(() => {
+      fxFrame = (fxFrame + 1) % FX_FRAMES;
+      fxTick++;
+      const now = Date.now();
+      const kinds = animatingKinds(state, now, (k) => [...views.values()].find((v) => v.kind === k)?.settings?.budget);
+      if (!kinds.length) return;
+      const live = [...views.entries()].filter(([, v]) => kinds.includes(v.kind));
+      if (!live.length) return;
+      // 6 keys at 8 fps fit the cap; 12 keys drop to 4 fps, 18 to ~2.7 fps. The frame
+      // counter still advances every tick, so motion speed stays the same, only smoothness drops.
+      const every = Math.ceil(live.length / perTick);
+      if (fxTick % every) return;
+      for (const [context, v] of live) render(context, v.kind);
+    }, Math.round(1000 / FX_FPS));
+  }
   // Keep countdowns ("1h 5m left") fresh between polls
   setInterval(() => {
     renderAll(["usage-session", "usage-weekly", "usage-model", "burn-rate", "approver-status", "approver-waiting", "focus-session", ...APPROVE_KINDS]);

@@ -132,6 +132,43 @@ export function sessionEta(state, now) {
   return hh > 0 ? `cap in ~${hh}h ${mm}m` : `cap in ~${mm}m`;
 }
 
+// ---------- fire ticker gate ----------
+// Which key kinds have something MOVING right now, so the fx ticker repaints only
+// those. Everything else keeps whatever frame it was last drawn with (the fire on a
+// stale blocked key is frozen at frame 0 by viewFor, a gauge under 50% has no fire).
+// Pure so the gate is testable; `budgetFor(kind)` supplies the per-key budget setting
+// that a local gauge needs to know its percentage.
+export const FX_GAUGE_PCT = 50;
+export const APPROVE_KINDS = ["approve-allow", "approve-always", "approve-deny"];
+export function animatingKinds(state, now, budgetFor = () => undefined) {
+  const kinds = [];
+  for (const kind of Object.keys(GAUGE_WINDOW)) {
+    const mode = gaugeMode(state, kind, now);
+    let pct = null;
+    if (mode === "subscription") {
+      const b = kind === "usage-session" ? state.usage?.fiveHour : kind === "usage-weekly" ? state.usage?.weekly : (state.usage?.models ?? [])[0];
+      pct = b?.pct ?? null;
+    } else if (mode === "local") {
+      const agg = kind === "usage-model" ? (state.usageMeterModels ?? [])[0] : state.usageMeter?.[GAUGE_WINDOW[kind]];
+      pct = agg ? budgetPct(agg.cost, budgetFor(kind)) : null;
+    }
+    if (pct != null && pct >= FX_GAUGE_PCT) kinds.push(kind);
+  }
+  const st = (s) => sessionState(s, now, state.activity?.get(s.sessionId) ?? null, pendKindOf(state, s));
+  const working = (state.sessions ?? []).some((s) => st(s) === "working");
+  const blocked = blockedSessions(state.sessions, now, state.activity, state.pending);
+  const freshBlocked = blocked.some((b) => {
+    const since = b.statusUpdatedAt ?? state.pending?.get(b.sessionId)?.since ?? null;
+    return !since || now - since < PULSE_MS;
+  });
+  if (working || blocked.length) kinds.push("sessions");
+  if (working || freshBlocked) kinds.push("approver-status");
+  if (freshBlocked) kinds.push("approver-waiting");
+  const req = approvable(state.approveQueue);
+  if (req && now - req.receivedAt < PULSE_MS) kinds.push(...APPROVE_KINDS);
+  return kinds;
+}
+
 // ---------- the view ----------
 // `env` carries everything the switch used to read from module scope:
 //   state           the data state (usage, sessions, approveQueue, …)

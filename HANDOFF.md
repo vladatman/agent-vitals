@@ -327,6 +327,29 @@ command passthrough in Claude Code).
   unrecoverable without a restart. `ensureHookServer()` also now queues one trailing
   re-run if a call arrives while another is in flight, instead of dropping it.
 
+## Fire animation layer (fx.js, 2026-11)
+
+- `src/fx.js` is pure: `(frame, heat, palette) -> SVG fragment`. No filters (the Stream
+  Deck renderer mangles `feGaussianBlur`), integer harmonics of one `FX_FRAMES` (24)
+  cycle so the loop is seamless at any frame rate. Colour still means state (keyart
+  rule 1): warm = waiting on you, violet = question, blue = working, green = done.
+- `viewFor(kind, env)` switches the layer on with `env.frame` (an integer). `frame` absent
+  or null = the pre-fx art, byte for byte (`test/view.test.js`, "fx:" tests). A blocked
+  status key burns hotter the longer it has waited (`waitHeat`, full at `HEAT_FULL_MS`),
+  freezes at frame 0 after `PULSE_MS` but keeps its fire. Gauges lick from 50%, burn with
+  embers from 90%. Approve keys spark while the request is fresh.
+- `plugin.js`: every `render()` passes the current `fxFrame`, so the 600 ms ticker, the
+  pollers and the fx ticker always draw the same look. The fx ticker (`FX_FPS` = 8) only
+  repaints kinds that `animatingKinds(state, now, budgetFor)` (view.js, pure, tested)
+  reports as moving. USB cap: `FX_MAX_IMAGES_PER_S` (48); above it the ticker drops its
+  frame rate for all moving keys evenly (6 keys = 8 fps, 12 = 4 fps). The frame counter
+  advances every tick regardless, so motion speed never changes, only smoothness.
+- Kill switch: start the plugin with `AGENT_VITALS_FX=0` and every key renders as before;
+  the 600 ms ticker was left untouched on purpose as that fallback.
+- Visual review: render frame strips with resvg (the gen-showcase pattern) and check the
+  detail line at y=127 stays legible; the status fire is capped at 66 px / 0.5 opacity and
+  the Sessions footer has a dark pill behind it for exactly that reason.
+
 ## Things NOT to do
 
 - Don't hand-edit `bin/plugin.mjs` — it's regenerated and your edit will
