@@ -582,3 +582,14 @@ test("Codex gauge burns from 50% and not below, only while its reading is fresh"
   assert.match(text(viewFor("usage-codex", { state: mk(63, 1000), now: NOW, frame: 3 }).image), tongue);
   assert.doesNotMatch(text(viewFor("usage-codex", { state: mk(63, 1000), now: NOW }).image), tongue);
 });
+
+test("usage gauges: a stale last reading shows with its age, an expired 5h window does not", () => {
+  const now = 1_000_000_000_000;
+  const mk = (usageAt) => ({ usage: { fiveHour: { pct: 40 }, weekly: { pct: 33 } }, usageErr: "usage endpoint HTTP 429", usageAt, approveQueue: [], sessions: [] });
+  const st = (kind, usageAt) => viewFor(kind, { state: mk(usageAt), now }).image;
+  const none = viewFor("usage-weekly", { state: { ...mk(0), usage: null }, now }).image;
+  assert.notEqual(st("usage-weekly", now - 18 * 3600_000), none);          // weekly 18h old is shown
+  const noData = viewFor("usage-session", { state: { ...mk(0), usage: null }, now }).image;
+  assert.equal(st("usage-session", now - 18 * 3600_000), noData);          // 5h window 18h old has reset: no data
+  assert.notEqual(st("usage-session", now - 60 * 60_000), noData);         // 1h old is shown
+});

@@ -219,6 +219,18 @@ export function demoState(now) {
 // Returns { image, painted }. `painted` is set only by the approve keys, which must
 // record the request id and rule they actually drew so a press cannot answer
 // something the user never saw; the caller stores it.
+// Last known reading shown as stale instead of a bare "--": an old number with its age beats none.
+// A 5-hour window older than 5 hours has reset, so it is not shown.
+function staleAge(now, at) {
+  const m = Math.max(0, Math.round((now - (at ?? 0)) / 60_000));
+  return m < 90 ? `${m}m old` : m < 48 * 60 ? `${Math.round(m / 60)}h old` : `${Math.round(m / 1440)}d old`;
+}
+function staleReading(state, now, pct, maxAgeMs) {
+  const at = state.usageAt ?? 0;
+  if (pct == null || !at || now - at > maxAgeMs) return null;
+  return { pct, sub: staleAge(now, at) };
+}
+
 export function viewFor(kind, env) {
   const {
     state, settings = {}, now, animPhase = null, usageViewMode = "cost",
@@ -234,6 +246,10 @@ export function viewFor(kind, env) {
     case "usage-session": {
       const mode = gaugeMode(state, "usage-session", now);
       if (mode === "local") return img(localGauge("LAST 5H", state.usageMeter?.["5h"], settings.budget, usageViewMode, animPhase, FX));
+      if (mode !== "subscription") {
+        const st = staleReading(state, now, state.usage?.fiveHour?.pct, 5 * 3600_000);
+        if (st) return img(gaugeKey("SESSION 5H", st.pct, st.sub));
+      }
       if (mode !== "subscription") return img(gaugeKey("SESSION 5H", null, mode === "throttled" ? "throttled" : mode === "error" ? "sign in?" : "no data"));
       const b = state.usage?.fiveHour;
       return img(gaugeKey("SESSION 5H", b?.pct ?? null, b ? fmtReset(b.resetsAt, now) : "no data", b?.pct >= 90 ? animPhase : null, FX));
@@ -241,6 +257,10 @@ export function viewFor(kind, env) {
     case "usage-weekly": {
       const mode = gaugeMode(state, "usage-weekly", now);
       if (mode === "local") return img(localGauge("LAST 7D", state.usageMeter?.["7day"], settings.budget, usageViewMode, animPhase, FX));
+      if (mode !== "subscription") {
+        const st = staleReading(state, now, state.usage?.weekly?.pct, 7 * 86400_000);
+        if (st) return img(gaugeKey("WEEKLY", st.pct, st.sub));
+      }
       if (mode !== "subscription") return img(gaugeKey("WEEKLY", null, mode === "throttled" ? "throttled" : mode === "error" ? "sign in?" : "no data"));
       const b = state.usage?.weekly;
       const u = state.usage;
