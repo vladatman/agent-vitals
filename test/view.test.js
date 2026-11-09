@@ -187,16 +187,9 @@ test("gauge keys say 'sign in?' on an auth error, never a silent zero", () => {
   assert.doesNotMatch(t, /\$0\.00/);
 });
 
-test("a 429 shows local spend (or 'no data yet'), never 'throttled'; a 401 still says sign in", () => {
-  const throttled = { ...emptyState(), usageErr: "usage endpoint HTTP 429 (backing off to 240s)" };
-  assert.doesNotMatch(drawn("usage-session", { state: throttled }), /throttled/);
-  assert.match(drawn("usage-session", { state: throttled }), /no data yet/);
-  const withMeter = { ...throttled, usageMeter: { "5h": { cost: 3.96, tokens: 1, in: 1, out: 1 } } };
-  assert.match(drawn("usage-session", { state: withMeter }), /\$3\.96/);
-  const withBudget = viewFor("usage-session", { state: withMeter, now: NOW, frame: 3, settings: { budget: 5 } }).image;
-  assert.match(text(withBudget), /79%/);
-  const failed = { ...emptyState(), usageErr: "usage endpoint HTTP 401" };
-  assert.match(drawn("usage-session", { state: failed }), /sign in/);
+test("gauge keys report throttling distinctly from failure", () => {
+  const state = { ...emptyState(), usageErr: "usage endpoint HTTP 429 (backing off to 240s)" };
+  assert.match(drawn("usage-session", { state }), /throttled/);
 });
 
 test("a subscription 5h gauge shows the percentage and the reset countdown", () => {

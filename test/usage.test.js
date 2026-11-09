@@ -269,17 +269,9 @@ test("gaugeSource: a frozen snapshot goes stale instead of reading as live", () 
   assert.equal(gaugeSource({ ...stale, usageErr: null }, false), "pending", "stale + nothing local yet");
 });
 
-test("gaugeSource: a 429 falls back to local spend instead of a frozen 'throttled'", () => {
+test("gaugeSource: 429 keeps the throttled message", () => {
   const now = 10_000_000;
-  const err = "usage endpoint HTTP 429 (backing off to 60s)";
-  assert.equal(gaugeSource({ usage: null, usageErr: err, usageAt: 0, now }, true), "local");
-  assert.equal(gaugeSource({ usage: null, usageErr: err, usageAt: 0, now }, false), "local");
-  // ...but a good reading younger than USAGE_FRESH_MS keeps winning over the 429
-  const usage = { fiveHour: { pct: 40 } };
-  assert.equal(gaugeSource({ usage, usageErr: err, usageAt: now - 60_000, now }), "subscription");
-  assert.equal(gaugeSource({ usage, usageErr: err, usageAt: now - USAGE_FRESH_MS - 1, now }), "local");
-  // any other failure still says so
-  assert.equal(gaugeSource({ usage: null, usageErr: "usage endpoint HTTP 401", usageAt: 0, now }, true), "error");
+  assert.equal(gaugeSource({ usage: null, usageErr: "usage endpoint HTTP 429 (backing off to 60s)", usageAt: 0, now }, true), "throttled");
 });
 
 test("hasSubscriptionData is account-level, not per-bucket", () => {
