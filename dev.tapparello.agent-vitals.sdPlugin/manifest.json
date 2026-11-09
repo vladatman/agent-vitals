@@ -30,7 +30,7 @@
   "Actions": [
     {
       "UUID": "dev.tapparello.agent-vitals.usage-session",
-      "Name": "Session Usage (5h)",
+      "Name": "5h Limit",
       "Tooltip": "5-hour usage: the subscription session limit, or local spend over the last 5 hours on accounts without one (Foundry/Bedrock/Vertex). Set a budget to get a ring. Press to refresh.",
       "Icon": "imgs/list/session",
       "PropertyInspectorPath": "pi/pi.html",
@@ -48,7 +48,7 @@
     },
     {
       "UUID": "dev.tapparello.agent-vitals.usage-weekly",
-      "Name": "Weekly Usage",
+      "Name": "Weekly Limit",
       "Tooltip": "Weekly usage: the subscription weekly limit, or local spend over the last 7 days on accounts without one. Set a budget to get a ring. Press to refresh.",
       "Icon": "imgs/list/weekly",
       "PropertyInspectorPath": "pi/pi.html",
@@ -66,7 +66,7 @@
     },
     {
       "UUID": "dev.tapparello.agent-vitals.sessions",
-      "Name": "Active Sessions",
+      "Name": "Sessions Overview",
       "Tooltip": "Running Claude Code sessions. Press to cycle through session details.",
       "Icon": "imgs/list/sessions",
       "Controllers": [
@@ -100,7 +100,7 @@
     },
     {
       "UUID": "dev.tapparello.agent-vitals.launch",
-      "Name": "Launch Claude Desktop",
+      "Name": "Open Claude Desktop",
       "Tooltip": "Open the Claude Desktop app.",
       "Icon": "imgs/list/launch",
       "Controllers": [
@@ -157,7 +157,7 @@
     },
     {
       "UUID": "dev.tapparello.agent-vitals.usage-model",
-      "Name": "Model Usage (weekly)",
+      "Name": "Model Limit (weekly)",
       "Tooltip": "Per-model usage: the subscription weekly per-model limit, or local 7-day spend per model on accounts without one. Pick the model in settings.",
       "Icon": "imgs/list/model",
       "PropertyInspectorPath": "pi/pi.html",
@@ -175,7 +175,7 @@
     },
     {
       "UUID": "dev.tapparello.agent-vitals.burn-rate",
-      "Name": "Burn Rate",
+      "Name": "Burn Rate and Cap ETA",
       "Tooltip": "Tokens per hour over the last hour, plus estimated time until the 5h session cap.",
       "Icon": "imgs/list/burn",
       "Controllers": [
@@ -192,7 +192,7 @@
     },
     {
       "UUID": "dev.tapparello.agent-vitals.project",
-      "Name": "Project Terminal",
+      "Name": "Open Project in Claude",
       "Tooltip": "Open Claude Code in a specific project folder. Configure the folder in settings.",
       "Icon": "imgs/list/project",
       "PropertyInspectorPath": "pi/pi.html",
@@ -209,7 +209,7 @@
     },
     {
       "UUID": "dev.tapparello.agent-vitals.focus-session",
-      "Name": "Focus Session",
+      "Name": "Jump to Session",
       "Tooltip": "Press to cycle through running Claude Code sessions and bring their window to the front.",
       "Icon": "imgs/list/focus",
       "Controllers": [
@@ -243,7 +243,7 @@
     },
     {
       "UUID": "dev.tapparello.agent-vitals.custom",
-      "Name": "Claude Custom",
+      "Name": "Open Anything",
       "Tooltip": "A Claude-styled key that opens anything you choose: app, URL, or folder.",
       "Icon": "imgs/list/custom",
       "PropertyInspectorPath": "pi/pi.html",
@@ -260,7 +260,7 @@
     },
     {
       "UUID": "dev.tapparello.agent-vitals.usage-meter",
-      "Name": "Usage",
+      "Name": "Spend and Tokens",
       "Tooltip": "Local Claude Code token volume + estimated cost for a time window. Press to toggle cost/tokens; pick the window in settings.",
       "Icon": "imgs/list/usage",
       "PropertyInspectorPath": "pi/pi.html",
@@ -278,7 +278,7 @@
     },
     {
       "UUID": "dev.tapparello.agent-vitals.approver-status",
-      "Name": "Claude Status",
+      "Name": "Session Status",
       "Tooltip": "Live state of a Claude Code session: Needs approval / Input needed / Working / Finished / Idle. Bind to a project in settings, or leave blank to auto-track the session that needs you.",
       "Icon": "imgs/list/status",
       "PropertyInspectorPath": "pi/pi.html",
@@ -296,7 +296,7 @@
     },
     {
       "UUID": "dev.tapparello.agent-vitals.approver-waiting",
-      "Name": "Claude Waiting",
+      "Name": "Needs You",
       "Tooltip": "Lights up when any Claude Code session is waiting on you (permission prompt or question). Press to jump to that session's window; press again to cycle if several are waiting.",
       "Icon": "imgs/list/waiting",
       "Controllers": [
@@ -313,7 +313,7 @@
     },
     {
       "UUID": "dev.tapparello.agent-vitals.approve-allow",
-      "Name": "Claude Allow",
+      "Name": "Allow",
       "Tooltip": "Approve the pending Claude Code permission prompt (same as pressing 1 in the terminal). Shows the command it would allow. Needs the one-time hook setup in this key's settings.",
       "Icon": "imgs/list/approve-allow",
       "Controllers": [
@@ -331,7 +331,7 @@
     },
     {
       "UUID": "dev.tapparello.agent-vitals.approve-always",
-      "Name": "Claude Always Allow",
+      "Name": "Always Allow",
       "Tooltip": "Approve and stop asking, using Claude Code's own suggested rule (same as pressing 2 in the terminal). The key shows the rule it would save. Greys out when no safe rule is offered.",
       "Icon": "imgs/list/approve-always",
       "Controllers": [
@@ -349,7 +349,7 @@
     },
     {
       "UUID": "dev.tapparello.agent-vitals.approve-deny",
-      "Name": "Claude Deny",
+      "Name": "Deny",
       "Tooltip": "Refuse the pending Claude Code permission prompt (same as pressing 3 in the terminal). The turn continues and Claude adapts.",
       "Icon": "imgs/list/approve-deny",
       "Controllers": [

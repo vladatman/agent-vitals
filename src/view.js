@@ -322,7 +322,7 @@ export function viewFor(kind, env) {
       const busy = state.sessions.filter((s) => sessionState(s, now, state.activity.get(s.sessionId) ?? null, pendKindOf(state, s)) === "working").length;
       const sub = blocked > 0 ? `${blocked} needs you` : busy > 0 ? `${busy} working` : n > 0 ? "all idle" : "none running";
       const subCol = blocked > 0 ? C.warn : busy > 0 ? C.info : C.dim;
-      return img(bigCountKey("CLAUDE CODE", n, sub, subCol, busy > 0 ? animPhase : null, blocked > 0 ? C.warn : busy > 0 ? C.info : null, blocked > 0,
+      return img(bigCountKey("SESSIONS", n, sub, subCol, busy > 0 ? animPhase : null, blocked > 0 ? C.warn : busy > 0 ? C.info : null, blocked > 0,
         FX && n > 0 ? { frame, states: state.sessions.map((s) => sessionState(s, now, state.activity.get(s.sessionId) ?? null, pendKindOf(state, s))) } : null));
     }
     case "today": {
@@ -374,7 +374,7 @@ export function viewFor(kind, env) {
       const blocked = blockedSessions(state.sessions, now, state.activity, state.pending);
       if (!blocked.length) {
         const n = state.sessions.length;
-        return img(statusKey("WAITING", "quiet", 1, n ? `${n} session${n > 1 ? "s" : ""} ok` : "no sessions"));
+        return img(statusKey("NEEDS YOU", "quiet", 1, n ? `${n} session${n > 1 ? "s" : ""} ok` : "no sessions"));
       }
       const i = cycleIdx >= 0 ? cycleIdx % blocked.length : 0;
       const b = blocked[i];
