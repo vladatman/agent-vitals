@@ -4985,6 +4985,36 @@ function animatingKinds(state2, now, budgetFor = () => void 0) {
   if (req && now - req.receivedAt < PULSE_MS) kinds.push(...APPROVE_KINDS);
   return kinds;
 }
+var DEMO_MS = 6e4;
+function demoState(now) {
+  const base2 = { cwd: "/demo", entrypoint: "cli", updatedAt: now, startedAt: now - 36e5 };
+  const reset = (d) => new Date(now + d).toISOString();
+  return {
+    sessions: [
+      { ...base2, sessionId: "demo1", pid: 90001, name: "overclock-lab", cwd: "/demo/overclock-lab", status: "waiting", waitingFor: "permission prompt", statusUpdatedAt: now - 9e4 },
+      { ...base2, sessionId: "demo2", pid: 90002, name: "kraken-ai-bot", cwd: "/demo/kraken-ai-bot", status: "busy" },
+      { ...base2, sessionId: "demo3", pid: 90003, name: "pc-health", cwd: "/demo/pc-health", status: "idle", updatedAt: now - 2e4 },
+      { ...base2, sessionId: "demo4", pid: 90004, name: "agent-vitals", cwd: "/demo/agent-vitals", status: "idle", updatedAt: now - 3e6 }
+    ],
+    activity: /* @__PURE__ */ new Map(),
+    pending: /* @__PURE__ */ new Map(),
+    usage: {
+      fiveHour: { pct: 94, resetsAt: reset(39e5) },
+      weekly: { pct: 62, resetsAt: reset(3 * 864e5) },
+      models: [{ name: "opus", model: "opus", pct: 78, resetsAt: reset(2 * 864e5) }]
+    },
+    usageErr: null,
+    usageAt: now,
+    usageMeter: null,
+    usageMeterModels: null,
+    today: { chats: 16, msgs: 804, tokens: 954e5 },
+    burn: { tokensHour: 438e5 },
+    pctHistory: [],
+    denies: [],
+    hookErr: null,
+    approveQueue: [{ id: -1, receivedAt: now - 3e3, toolName: "Bash", cwd: "/demo/overclock-lab", toolInput: { command: "npm test" }, suggestions: [] }]
+  };
+}
 function viewFor(kind, env) {
   const {
     state: state2,
@@ -5844,6 +5874,15 @@ var FX_ON = process.env.AGENT_VITALS_FX !== "0";
 var FX_FPS = 8;
 var FX_MAX_IMAGES_PER_S = 48;
 var fxFrame = 0;
+var FX_DEMO_FILE = path3.join(process.cwd(), "fx-demo");
+var fxDemo = false;
+var fxDemoWanted = () => {
+  try {
+    return Date.now() - fs.statSync(FX_DEMO_FILE).mtimeMs < DEMO_MS;
+  } catch {
+    return false;
+  }
+};
 var lastSessionSig = "";
 function send(obj) {
   if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj));
@@ -5856,7 +5895,7 @@ function render(context, kind) {
   const v = views.get(context);
   const cy = cycle.get(context);
   const { image, painted } = viewFor(kind, {
-    state,
+    state: fxDemo ? demoState(Date.now()) : state,
     settings: v?.settings ?? {},
     now: Date.now(),
     animPhase,
@@ -5869,7 +5908,7 @@ function render(context, kind) {
     authFlagged: authFlagged(),
     defaultCodeDir: DEFAULT_CODE_DIR
   });
-  if (painted) {
+  if (painted && !fxDemo) {
     shownReq.set(context, painted.reqId);
     shownRule.set(context, painted.rule);
   }
@@ -6518,7 +6557,15 @@ if (process.argv.includes("--selftest")) {
       fxFrame = (fxFrame + 1) % FX_FRAMES;
       fxTick++;
       const now = Date.now();
-      const kinds = animatingKinds(state, now, (k) => [...views.values()].find((v) => v.kind === k)?.settings?.budget);
+      if (fxTick % FX_FPS === 0) {
+        const want = fxDemoWanted();
+        if (want !== fxDemo) {
+          fxDemo = want;
+          log(fxDemo ? "fx demo on" : "fx demo off");
+          for (const [c, v] of views) render(c, v.kind);
+        }
+      }
+      const kinds = animatingKinds(fxDemo ? demoState(now) : state, now, (k) => [...views.values()].find((v) => v.kind === k)?.settings?.budget);
       if (!kinds.length) return;
       const live = [...views.entries()].filter(([, v]) => kinds.includes(v.kind));
       if (!live.length) return;

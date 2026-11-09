@@ -20,7 +20,7 @@ import {
 } from "./approve.js";
 import { startHookServer, BADPATH_WINDOW_MS, BADPATH_MIN_HITS } from "./hookserver.js";
 import {
-  viewFor, gaugeMode, GAUGE_WINDOW, modelList, modelListIndex, sessionEta, PULSE_MS, animatingKinds,
+  viewFor, gaugeMode, GAUGE_WINDOW, modelList, modelListIndex, sessionEta, PULSE_MS, animatingKinds, demoState, DEMO_MS,
 } from "./view.js";
 import { FX_FRAMES } from "./fx.js";
 
@@ -782,6 +782,13 @@ const FX_FPS = 8;
 // evenly rather than letting some keys stutter.
 const FX_MAX_IMAGES_PER_S = 48;
 let fxFrame = 0;
+// Demo: dropping a file named `fx-demo` into the plugin folder (cwd) shows a made-up hot
+// state on every key for DEMO_MS after the file's mtime, then everything repaints for real.
+const FX_DEMO_FILE = path.join(process.cwd(), "fx-demo");
+let fxDemo = false;
+const fxDemoWanted = () => {
+  try { return Date.now() - fs.statSync(FX_DEMO_FILE).mtimeMs < DEMO_MS; } catch { return false; }
+};
 let lastSessionSig = ""; // previous tick's session signature (see pollSessions)
 
 function send(obj) {
@@ -800,7 +807,7 @@ function render(context, kind) {
   const v = views.get(context);
   const cy = cycle.get(context);
   const { image, painted } = viewFor(kind, {
-    state,
+    state: fxDemo ? demoState(Date.now()) : state,
     settings: v?.settings ?? {},
     now: Date.now(),
     animPhase,
@@ -813,7 +820,7 @@ function render(context, kind) {
     authFlagged: authFlagged(),
     defaultCodeDir: DEFAULT_CODE_DIR,
   });
-  if (painted) {
+  if (painted && !fxDemo) {
     shownReq.set(context, painted.reqId);
     shownRule.set(context, painted.rule);
   }
@@ -1503,7 +1510,15 @@ if (process.argv.includes("--selftest")) {
       fxFrame = (fxFrame + 1) % FX_FRAMES;
       fxTick++;
       const now = Date.now();
-      const kinds = animatingKinds(state, now, (k) => [...views.values()].find((v) => v.kind === k)?.settings?.budget);
+      if (fxTick % FX_FPS === 0) {
+        const want = fxDemoWanted();
+        if (want !== fxDemo) {
+          fxDemo = want;
+          log(fxDemo ? "fx demo on" : "fx demo off");
+          for (const [c, v] of views) render(c, v.kind);   // swap every key to / from the demo look at once
+        }
+      }
+      const kinds = animatingKinds(fxDemo ? demoState(now) : state, now, (k) => [...views.values()].find((v) => v.kind === k)?.settings?.budget);
       if (!kinds.length) return;
       const live = [...views.entries()].filter(([, v]) => kinds.includes(v.kind));
       if (!live.length) return;

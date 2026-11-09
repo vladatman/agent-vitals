@@ -169,6 +169,36 @@ export function animatingKinds(state, now, budgetFor = () => undefined) {
   return kinds;
 }
 
+// ---------- demo state ----------
+// A made-up, deliberately hot state for showing the fire on a calm deck: one session
+// blocked 90 s, one working, one finished, one idle, 94 % / 62 % / 78 % gauges and a
+// fresh approve request. plugin.js swaps it in for 60 s when an `fx-demo` file appears
+// in the plugin folder, and never lets it answer anything (the press guard sees no
+// painted request id while the demo is on).
+export const DEMO_MS = 60_000;
+export function demoState(now) {
+  const base = { cwd: "/demo", entrypoint: "cli", updatedAt: now, startedAt: now - 3_600_000 };
+  const reset = (d) => new Date(now + d).toISOString();
+  return {
+    sessions: [
+      { ...base, sessionId: "demo1", pid: 90001, name: "overclock-lab", cwd: "/demo/overclock-lab", status: "waiting", waitingFor: "permission prompt", statusUpdatedAt: now - 90_000 },
+      { ...base, sessionId: "demo2", pid: 90002, name: "kraken-ai-bot", cwd: "/demo/kraken-ai-bot", status: "busy" },
+      { ...base, sessionId: "demo3", pid: 90003, name: "pc-health", cwd: "/demo/pc-health", status: "idle", updatedAt: now - 20_000 },
+      { ...base, sessionId: "demo4", pid: 90004, name: "agent-vitals", cwd: "/demo/agent-vitals", status: "idle", updatedAt: now - 3_000_000 },
+    ],
+    activity: new Map(), pending: new Map(),
+    usage: {
+      fiveHour: { pct: 94, resetsAt: reset(3_900_000) },
+      weekly: { pct: 62, resetsAt: reset(3 * 86_400_000) },
+      models: [{ name: "opus", model: "opus", pct: 78, resetsAt: reset(2 * 86_400_000) }],
+    },
+    usageErr: null, usageAt: now, usageMeter: null, usageMeterModels: null,
+    today: { chats: 16, msgs: 804, tokens: 95_400_000 }, burn: { tokensHour: 43_800_000 },
+    pctHistory: [], denies: [], hookErr: null,
+    approveQueue: [{ id: -1, receivedAt: now - 3_000, toolName: "Bash", cwd: "/demo/overclock-lab", toolInput: { command: "npm test" }, suggestions: [] }],
+  };
+}
+
 // ---------- the view ----------
 // `env` carries everything the switch used to read from module scope:
 //   state           the data state (usage, sessions, approveQueue, …)

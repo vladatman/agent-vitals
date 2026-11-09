@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { viewFor, gaugeMode, modelListIndex, sessionEta, fmtAgo, fmtReset, animatingKinds, waitHeat, PULSE_MS, HEAT_FULL_MS } from "../src/view.js";
+import { viewFor, gaugeMode, modelListIndex, sessionEta, fmtAgo, fmtReset, animatingKinds, waitHeat, PULSE_MS, HEAT_FULL_MS, demoState, DEMO_MS } from "../src/view.js";
 
 // keyart returns a data URI, so decode before asserting. These tests deliberately
 // assert on the TEXT the key draws rather than on SVG structure: the text is the
@@ -533,4 +533,25 @@ test("animatingKinds: the approve triad sparks only while a real request is fres
   assert.deepEqual(animatingKinds(fresh, NOW), ["approve-allow", "approve-always", "approve-deny"]);
   const stale = { ...emptyState(), approveQueue: [req({ receivedAt: NOW - PULSE_MS })] };
   assert.deepEqual(animatingKinds(stale, NOW), []);
+});
+
+// ---------- demo state (fx-demo flag file) ----------
+test("demo state lights every animated key kind and every key renders with it", () => {
+  const st = demoState(NOW);
+  const lit = animatingKinds(st, NOW);
+  for (const k of ["usage-session", "usage-weekly", "usage-model", "sessions", "approver-status", "approver-waiting", "approve-allow", "approve-always", "approve-deny"]) {
+    assert.ok(lit.includes(k), `${k} is not animated in the demo`);
+  }
+  for (const kind of ALL_KINDS) {
+    const { image } = viewFor(kind, { state: st, now: NOW, frame: 4 });
+    assert.ok(typeof image === "string" && image.startsWith("data:image/svg+xml,"), `${kind} drew nothing in the demo`);
+  }
+  assert.equal(DEMO_MS, 60_000);
+});
+
+test("demo state burns: hot gauge, blocked status, spark on approve", () => {
+  const st = demoState(NOW);
+  assert.match(drawn("usage-session", { state: st, frame: 2 }), /94%/);
+  assert.match(drawn("approver-waiting", { state: st, frame: 2 }), /Needs approval/);
+  assert.match(drawn("approve-allow", { state: st, frame: 2 }), /npm test/);
 });
