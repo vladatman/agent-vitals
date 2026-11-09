@@ -9,7 +9,7 @@ import path from "node:path";
 import { spawn, execFile } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { escapeAppleScript, parseHotkey, hotkeyClause, classifyCustomCommand, parseKeychainToken, parsePsTree, hostAppForPid, focusStrategyForBundle, terminalFocusScript, parseProcStarts } from "./osa.js";
-import { windowStartMs, parseRequests, mergeById, aggregate, aggregateByModel, budgetPct, localDay, newDayCounts, foldDayChunk, dayCountsTotals } from "./usage.js";
+import { parseLimitFile, LIMIT_FRESH_MS, windowStartMs, parseRequests, mergeById, aggregate, aggregateByModel, budgetPct, localDay, newDayCounts, foldDayChunk, dayCountsTotals } from "./usage.js";
 import { resolveStatusKey, statusEntry, autoSlot, sessionState, blockedSessions, sessionSig, transcriptPathFor, pidLooksRecycled } from "./status.js";
 import { randomBytes } from "node:crypto";
 import {
@@ -84,6 +84,7 @@ const state = {
   usageMeter: null,   // { [window]: {tokens, cost, in, out} } from pollUsageMeter
   usageMeterModels: null, // [{model,tokens,cost}] over 7d, for the model key in local mode
   usageAt: 0,
+  limit: null,        // { claude, codex } from the Lab limit gate's limit.json (see pollLimitFile)
   sessions: [],
   today: null,
   burn: null,
@@ -125,7 +126,32 @@ try {
   if (Date.now() - c.at < 30 * 60_000) { state.usage = c.usage; state.usageAt = c.at; }
 } catch {}
 
+// The Lab limit gate (overclock-lab tools/limit/gate.mjs) writes Claude and Codex 5-hour
+// percentages here every few minutes. One shared reader beats a second poller on an endpoint
+// that answers 429 to everyone; Codex has no other source. Override with AGENT_VITALS_LIMIT_FILE
+// (empty string turns the reader off).
+const LIMIT_FILE = process.env.AGENT_VITALS_LIMIT_FILE ?? (IS_MAC ? "" : "E:\\local-compute\\limit.json");
+const limitClaudeFresh = () => !!state.limit?.claude && Date.now() - state.limit.claude.at < 15 * 60_000;
+async function pollLimitFile() {
+  if (!LIMIT_FILE) return;
+  let parsed;
+  try { parsed = parseLimitFile(JSON.parse(await fsp.readFile(LIMIT_FILE, "utf8"))); } catch { return; }
+  const before = JSON.stringify(state.limit);
+  state.limit = { claude: parsed.claude, codex: parsed.codex };
+  const c = parsed.claude;
+  // A Claude reading newer than our own (or when our own endpoint is failing) feeds the Session and
+  // Weekly gauges, so they come back even while this plugin's own call keeps getting 429.
+  if (c && c.at > state.usageAt) {
+    const prev = state.usage ?? {};
+    state.usage = { ...prev, fiveHour: { pct: c.pct, resetsAt: c.resetsAt }, ...(c.week != null ? { weekly: { pct: c.week, resetsAt: prev.weekly?.resetsAt ?? null } } : {}) };
+    state.usageErr = null;
+    state.usageAt = c.at;
+  }
+  if (JSON.stringify(state.limit) !== before || c) renderAll(["usage-session", "usage-weekly", "usage-model", "usage-codex", "burn-rate"]);
+}
+
 async function pollUsage() {
+  if (limitClaudeFresh()) return;   // the gate already has a fresh reading: do not add to the 429s
   lastUsageAttempt = Date.now();
   try {
     const token = await platform.readToken();
@@ -1177,6 +1203,9 @@ function onKeyDown(context, kind) {
       else if (Date.now() - lastUsageAttempt > 30_000) pollUsage();
       return render(context, "usage-model");
     }
+    case "usage-codex":
+      pollLimitFile();   // the gate refreshes the file itself; a press just re-reads it
+      return render(context, "usage-codex");
     case "burn-rate":
       pollBurn();
       return;
@@ -1448,6 +1477,8 @@ if (process.argv.includes("--selftest")) {
 
   (function usageLoop() { setTimeout(async () => { await pollUsage(); usageLoop(); }, usageDelay); })();
   setInterval(pollSessions, 5_000);
+  pollLimitFile();
+  setInterval(pollLimitFile, 30_000);
   setInterval(pollToday, 300_000);
   pollBurn();
   setInterval(pollBurn, 60_000);
@@ -1458,6 +1489,7 @@ if (process.argv.includes("--selftest")) {
     const kinds = [];
     if (state.sessions.some((s) => sessionState(s, Date.now(), state.activity.get(s.sessionId) ?? null, state.pending.get(s.sessionId)?.kind ?? null) === "working")) kinds.push("sessions");
     if (state.usage?.fiveHour?.pct >= 90) kinds.push("usage-session");
+    if (state.limit?.codex?.pct >= 90 && Date.now() - state.limit.codex.at < LIMIT_FRESH_MS) kinds.push("usage-codex");
     if (state.usage?.weekly?.pct >= 90) kinds.push("usage-weekly");
     if ((state.usage?.models ?? []).some((m) => m.pct >= 90)) kinds.push("usage-model");
     // Local/budget rings live outside state.usage, so gate them separately or a
@@ -1531,7 +1563,7 @@ if (process.argv.includes("--selftest")) {
   }
   // Keep countdowns ("1h 5m left") fresh between polls
   setInterval(() => {
-    renderAll(["usage-session", "usage-weekly", "usage-model", "burn-rate", "approver-status", "approver-waiting", "focus-session", ...APPROVE_KINDS]);
+    renderAll(["usage-session", "usage-weekly", "usage-model", "usage-codex", "burn-rate", "approver-status", "approver-waiting", "focus-session", ...APPROVE_KINDS]);
     // Self-heal a failed bind: nothing else retries after the initial attempts.
     if (state.hookErr) ensureHookServer();
   }, 30_000);

@@ -13,7 +13,7 @@ import {
   C, gaugeKey, linesKey, bigCountKey, burnKey, usageMeterKey, labelKey, actionKey,
   statusKey, approveKey, fmtNum,
 } from "./keyart.js";
-import { budgetPct, gaugeSource, familyOf } from "./usage.js";
+import { budgetPct, gaugeSource, familyOf, LIMIT_FRESH_MS } from "./usage.js";
 import {
   resolveStatusKey, statusEntry, sessionWhere, fmtShort, shortWait, sessionState,
   blockedSessions,
@@ -154,6 +154,8 @@ export function animatingKinds(state, now, budgetFor = () => undefined) {
     }
     if (pct != null && pct >= FX_GAUGE_PCT) kinds.push(kind);
   }
+  const codex = state.limit?.codex;
+  if (codex && now - codex.at <= LIMIT_FRESH_MS && codex.pct >= FX_GAUGE_PCT) kinds.push("usage-codex");
   const st = (s) => sessionState(s, now, state.activity?.get(s.sessionId) ?? null, pendKindOf(state, s));
   const working = (state.sessions ?? []).some((s) => st(s) === "working");
   const blocked = blockedSessions(state.sessions, now, state.activity, state.pending);
@@ -192,6 +194,7 @@ export function demoState(now) {
       weekly: { pct: 62, resetsAt: reset(3 * 86_400_000) },
       models: [{ name: "opus", model: "opus", pct: 78, resetsAt: reset(2 * 86_400_000) }],
     },
+    limit: { codex: { pct: 63, resetsAt: reset(2 * 3_600_000), at: now }, claude: null },
     usageErr: null, usageAt: now, usageMeter: null, usageMeterModels: null,
     today: { chats: 16, msgs: 804, tokens: 95_400_000 }, burn: { tokensHour: 43_800_000 },
     pctHistory: [], denies: [], hookErr: null,
@@ -263,6 +266,13 @@ export function viewFor(kind, env) {
         return img(localGauge(head_ + more, pick, settings.budget, usageViewMode, animPhase, FX));
       }
       return img(gaugeKey(head_ + more, pick.pct ?? null, pick.resetsAt ? fmtReset(pick.resetsAt, now) : "no data", pick.pct >= 90 ? animPhase : null, FX));
+    }
+    case "usage-codex": {
+      // Codex has no other source than the Lab limit gate's limit.json (state.limit).
+      const c = state.limit?.codex;
+      if (!c) return img(gaugeKey("CODEX 5H", null, "no data"));
+      if (now - c.at > LIMIT_FRESH_MS) return img(gaugeKey("CODEX 5H", null, "stale"));
+      return img(gaugeKey("CODEX 5H", c.pct, c.resetsAt ? fmtReset(c.resetsAt, now) : "", c.pct >= 90 ? animPhase : null, FX));
     }
     case "burn-rate":
       return img(burnKey(state.burn?.tokensHour ?? null, sessionEta(state, now)));

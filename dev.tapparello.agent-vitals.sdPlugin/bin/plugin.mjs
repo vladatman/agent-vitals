@@ -4052,6 +4052,23 @@ function gaugeSource({ usage, usageErr, usageAt, now }, hasLocal = false) {
   if (usageErr) return "error";
   return hasLocal ? "local" : "pending";
 }
+var LIMIT_FRESH_MS = 40 * 6e4;
+var pctNum = (v) => Number.isFinite(Number(v)) && v !== null && v !== "" ? Math.max(0, Math.min(100, Number(v))) : null;
+var atMs = (v, fallback) => {
+  const t = Date.parse(v);
+  return Number.isFinite(t) ? t : fallback;
+};
+function limitSide(live, good, fileAt, extra) {
+  const pick = (r, at) => r && pctNum(r.pct) != null ? { pct: pctNum(r.pct), resetsAt: r.resetsAt ?? null, ...extra(r), at } : null;
+  return pick(live, fileAt) ?? pick(good, atMs(good?.readAt, 0));
+}
+function parseLimitFile(j) {
+  if (!j || typeof j !== "object") return { claude: null, codex: null, fileAt: 0 };
+  const fileAt = atMs(j.at, 0);
+  const claude = limitSide(j.claude, j.lastGood?.claude, fileAt, (r) => ({ week: pctNum(r.week) }));
+  const codex = limitSide(j.codex, j.lastGood?.codex, fileAt, () => ({}));
+  return { claude, codex, fileAt };
+}
 
 // src/status.js
 import path from "node:path";
@@ -4664,6 +4681,7 @@ var GLYPHS = {
   clock: ["M12 12 m-8.5 0 a8.5 8.5 0 1 0 17 0 a8.5 8.5 0 1 0 -17 0", "M12 6.5 V12 l4 2.5"],
   calendar: ["M4 6.5 h16 v14 H4 z", "M4 11 h16", "M8 3 v4", "M16 3 v4"],
   week: ["M4 6.5 h16 v14 H4 z", "M4 11 h16", "M8 3 v4", "M16 3 v4", "M7.5 15 h3", "M13.5 15 h3"],
+  chip: ["M7 7 h10 v10 H7 z", "M10 3 v4", "M14 3 v4", "M10 17 v4", "M14 17 v4", "M3 10 h4", "M3 14 h4", "M17 10 h4", "M17 14 h4"],
   grid: ["M4 4.5 h6 v6 H4 z", "M14 4.5 h6 v6 h-6 z", "M4 13.5 h6 v6 H4 z", "M14 13.5 h6 v6 h-6 z"]
 };
 function glyph(name, x, y, size, col, sw = 2.6) {
@@ -4971,6 +4989,8 @@ function animatingKinds(state2, now, budgetFor = () => void 0) {
     }
     if (pct != null && pct >= FX_GAUGE_PCT) kinds.push(kind);
   }
+  const codex = state2.limit?.codex;
+  if (codex && now - codex.at <= LIMIT_FRESH_MS && codex.pct >= FX_GAUGE_PCT) kinds.push("usage-codex");
   const st = (s) => sessionState(s, now, state2.activity?.get(s.sessionId) ?? null, pendKindOf(state2, s));
   const working = (state2.sessions ?? []).some((s) => st(s) === "working");
   const blocked = blockedSessions(state2.sessions, now, state2.activity, state2.pending);
@@ -5003,6 +5023,7 @@ function demoState(now) {
       weekly: { pct: 62, resetsAt: reset(3 * 864e5) },
       models: [{ name: "opus", model: "opus", pct: 78, resetsAt: reset(2 * 864e5) }]
     },
+    limit: { codex: { pct: 63, resetsAt: reset(2 * 36e5), at: now }, claude: null },
     usageErr: null,
     usageAt: now,
     usageMeter: null,
@@ -5066,6 +5087,12 @@ function viewFor(kind, env) {
       }
       return img(gaugeKey(head_ + more, pick.pct ?? null, pick.resetsAt ? fmtReset(pick.resetsAt, now) : "no data", pick.pct >= 90 ? animPhase2 : null, FX));
     }
+    case "usage-codex": {
+      const c = state2.limit?.codex;
+      if (!c) return img(gaugeKey("CODEX 5H", null, "no data"));
+      if (now - c.at > LIMIT_FRESH_MS) return img(gaugeKey("CODEX 5H", null, "stale"));
+      return img(gaugeKey("CODEX 5H", c.pct, c.resetsAt ? fmtReset(c.resetsAt, now) : "", c.pct >= 90 ? animPhase2 : null, FX));
+    }
     case "burn-rate":
       return img(burnKey(state2.burn?.tokensHour ?? null, sessionEta(state2, now)));
     case "project": {
@@ -5118,7 +5145,7 @@ function viewFor(kind, env) {
       const sub = blocked > 0 ? `${blocked} needs you` : busy > 0 ? `${busy} working` : n > 0 ? "all idle" : "none running";
       const subCol = blocked > 0 ? C.warn : busy > 0 ? C.info : C.dim;
       return img(bigCountKey(
-        "CLAUDE CODE",
+        "SESSIONS",
         n,
         sub,
         subCol,
@@ -5179,7 +5206,7 @@ function viewFor(kind, env) {
       const blocked = blockedSessions(state2.sessions, now, state2.activity, state2.pending);
       if (!blocked.length) {
         const n = state2.sessions.length;
-        return img(statusKey("WAITING", "quiet", 1, n ? `${n} session${n > 1 ? "s" : ""} ok` : "no sessions"));
+        return img(statusKey("NEEDS YOU", "quiet", 1, n ? `${n} session${n > 1 ? "s" : ""} ok` : "no sessions"));
       }
       const i = cycleIdx >= 0 ? cycleIdx % blocked.length : 0;
       const b = blocked[i];
@@ -5289,6 +5316,8 @@ var state = {
   usageMeterModels: null,
   // [{model,tokens,cost}] over 7d, for the model key in local mode
   usageAt: 0,
+  limit: null,
+  // { claude, codex } from the Lab limit gate's limit.json (see pollLimitFile)
   sessions: [],
   today: null,
   burn: null,
@@ -5328,7 +5357,29 @@ try {
   }
 } catch {
 }
+var LIMIT_FILE = process.env.AGENT_VITALS_LIMIT_FILE ?? (IS_MAC ? "" : "E:\\local-compute\\limit.json");
+var limitClaudeFresh = () => !!state.limit?.claude && Date.now() - state.limit.claude.at < 15 * 6e4;
+async function pollLimitFile() {
+  if (!LIMIT_FILE) return;
+  let parsed;
+  try {
+    parsed = parseLimitFile(JSON.parse(await fsp.readFile(LIMIT_FILE, "utf8")));
+  } catch {
+    return;
+  }
+  const before = JSON.stringify(state.limit);
+  state.limit = { claude: parsed.claude, codex: parsed.codex };
+  const c = parsed.claude;
+  if (c && c.at > state.usageAt) {
+    const prev = state.usage ?? {};
+    state.usage = { ...prev, fiveHour: { pct: c.pct, resetsAt: c.resetsAt }, ...c.week != null ? { weekly: { pct: c.week, resetsAt: prev.weekly?.resetsAt ?? null } } : {} };
+    state.usageErr = null;
+    state.usageAt = c.at;
+  }
+  if (JSON.stringify(state.limit) !== before || c) renderAll(["usage-session", "usage-weekly", "usage-model", "usage-codex", "burn-rate"]);
+}
 async function pollUsage() {
+  if (limitClaudeFresh()) return;
   lastUsageAttempt = Date.now();
   try {
     const token = await platform.readToken();
@@ -6241,6 +6292,9 @@ function onKeyDown(context, kind) {
       else if (Date.now() - lastUsageAttempt > 3e4) pollUsage();
       return render(context, "usage-model");
     }
+    case "usage-codex":
+      pollLimitFile();
+      return render(context, "usage-codex");
     case "burn-rate":
       pollBurn();
       return;
@@ -6519,6 +6573,8 @@ if (process.argv.includes("--selftest")) {
     }, usageDelay);
   })();
   setInterval(pollSessions, 5e3);
+  pollLimitFile();
+  setInterval(pollLimitFile, 3e4);
   setInterval(pollToday, 3e5);
   pollBurn();
   setInterval(pollBurn, 6e4);
@@ -6528,6 +6584,7 @@ if (process.argv.includes("--selftest")) {
     const kinds = [];
     if (state.sessions.some((s) => sessionState(s, Date.now(), state.activity.get(s.sessionId) ?? null, state.pending.get(s.sessionId)?.kind ?? null) === "working")) kinds.push("sessions");
     if (state.usage?.fiveHour?.pct >= 90) kinds.push("usage-session");
+    if (state.limit?.codex?.pct >= 90 && Date.now() - state.limit.codex.at < LIMIT_FRESH_MS) kinds.push("usage-codex");
     if (state.usage?.weekly?.pct >= 90) kinds.push("usage-weekly");
     if ((state.usage?.models ?? []).some((m) => m.pct >= 90)) kinds.push("usage-model");
     for (const [k, win] of Object.entries(GAUGE_WINDOW)) {
@@ -6575,7 +6632,7 @@ if (process.argv.includes("--selftest")) {
     }, Math.round(1e3 / FX_FPS));
   }
   setInterval(() => {
-    renderAll(["usage-session", "usage-weekly", "usage-model", "burn-rate", "approver-status", "approver-waiting", "focus-session", ...APPROVE_KINDS2]);
+    renderAll(["usage-session", "usage-weekly", "usage-model", "usage-codex", "burn-rate", "approver-status", "approver-waiting", "focus-session", ...APPROVE_KINDS2]);
     if (state.hookErr) ensureHookServer();
   }, 3e4);
 }

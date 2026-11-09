@@ -27,6 +27,7 @@ const ICONS = {
   // usage / reporting
   session: ["gauge", C.text],
   weekly: ["week", C.text],
+  codex: ["chip", C.text],
   model: ["layers", C.text],
   "usage": ["meter", C.text],
   burn: ["rising", C.text],

@@ -22,7 +22,7 @@ const session = (over = {}) => ({
 });
 
 const ALL_KINDS = [
-  "usage-session", "usage-weekly", "usage-model", "burn-rate", "project",
+  "usage-session", "usage-weekly", "usage-model", "usage-codex", "burn-rate", "project",
   "focus-session", "quick-prompt", "custom", "launch", "quick-chat", "open-web",
   "claude-code", "sessions", "today", "usage-meter", "approver-status",
   "approver-waiting", "approve-allow", "approve-always", "approve-deny",
@@ -554,4 +554,31 @@ test("demo state burns: hot gauge, blocked status, spark on approve", () => {
   assert.match(drawn("usage-session", { state: st, frame: 2 }), /94%/);
   assert.match(drawn("approver-waiting", { state: st, frame: 2 }), /Needs approval/);
   assert.match(drawn("approve-allow", { state: st, frame: 2 }), /npm test/);
+});
+
+// ---------- Codex gauge + limit.json ----------
+test("Codex gauge shows the percentage and the reset countdown from limit.json", () => {
+  const state = { ...emptyState(), limit: { codex: { pct: 63, resetsAt: new Date(NOW + 2 * 3_600_000).toISOString(), at: NOW - 60_000 }, claude: null } };
+  const t = drawn("usage-codex", { state });
+  assert.match(t, /CODEX 5H/);
+  assert.match(t, /63%/);
+  assert.match(t, /2h 0m left/);
+});
+
+test("Codex gauge says no data / stale instead of a number it does not have", () => {
+  assert.match(drawn("usage-codex", { state: emptyState() }), /no data/);
+  const stale = { ...emptyState(), limit: { codex: { pct: 10, resetsAt: null, at: NOW - 41 * 60_000 }, claude: null } };
+  const t = drawn("usage-codex", { state: stale });
+  assert.match(t, /stale/);
+  assert.doesNotMatch(t, /10%/);
+});
+
+test("Codex gauge burns from 50% and not below, only while its reading is fresh", () => {
+  const mk = (pct, ageMs) => ({ ...emptyState(), limit: { codex: { pct, resetsAt: null, at: NOW - ageMs }, claude: null } });
+  assert.ok(animatingKinds(mk(63, 1000), NOW).includes("usage-codex"));
+  assert.ok(!animatingKinds(mk(30, 1000), NOW).includes("usage-codex"));
+  assert.ok(!animatingKinds(mk(63, 41 * 60_000), NOW).includes("usage-codex"));
+  const tongue = /<path d="M[^"]* C[^"]*" fill="#[0-9a-f]{6}" opacity="/;
+  assert.match(text(viewFor("usage-codex", { state: mk(63, 1000), now: NOW, frame: 3 }).image), tongue);
+  assert.doesNotMatch(text(viewFor("usage-codex", { state: mk(63, 1000), now: NOW }).image), tongue);
 });
