@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { viewFor, gaugeMode, modelListIndex, sessionEta, fmtAgo, fmtReset } from "../src/view.js";
+import { viewFor, gaugeMode, modelListIndex, sessionEta, fmtAgo, fmtReset, animatingKinds, waitHeat, PULSE_MS, HEAT_FULL_MS, demoState, DEMO_MS } from "../src/view.js";
 
 // keyart returns a data URI, so decode before asserting. These tests deliberately
 // assert on the TEXT the key draws rather than on SVG structure: the text is the
@@ -22,7 +22,7 @@ const session = (over = {}) => ({
 });
 
 const ALL_KINDS = [
-  "usage-session", "usage-weekly", "usage-model", "burn-rate", "project",
+  "usage-session", "usage-weekly", "usage-model", "usage-codex", "burn-rate", "project",
   "focus-session", "quick-prompt", "custom", "launch", "quick-chat", "open-web",
   "claude-code", "sessions", "today", "usage-meter", "approver-status",
   "approver-waiting", "approve-allow", "approve-always", "approve-deny",
@@ -449,4 +449,147 @@ test("a pending permission prompt reads as needs-approval, not 'working'", () =>
   assert.match(drawn("approver-waiting", { state }), /permission/);
   // the Sessions key counts it as blocked rather than busy
   assert.doesNotMatch(drawn("sessions", { state }), /1 busy/);
+});
+
+// ---------- fire animation (env.frame) ----------
+// Without a frame every key must draw byte-for-byte what it drew before the fx layer
+// existed; the flames are opt-in, keyed on `frame` alone.
+const hotState = () => ({
+  ...emptyState(),
+  sessions: [session({ status: "waiting", waitingFor: "permission prompt", statusUpdatedAt: NOW - 5_000 }), session({ sessionId: "s2", pid: 101, status: "busy" })],
+  usage: { fiveHour: { pct: 72, resetsAt: new Date(NOW + 3.6e6).toISOString() }, weekly: { pct: 20, resetsAt: new Date(NOW + 2 * 86.4e6).toISOString() }, models: [] },
+  usageAt: NOW,
+  approveQueue: [req()],
+});
+
+test("fx: without env.frame the output is unchanged (no fire paths), with it the fire appears", () => {
+  const state = hotState();
+  for (const kind of ALL_KINDS) {
+    const plain = viewFor(kind, { state, now: NOW }).image;
+    const undef = viewFor(kind, { state, now: NOW, frame: undefined }).image;
+    assert.equal(plain, undef, `${kind}: frame: undefined must equal no frame`);
+    assert.equal(plain, viewFor(kind, { state, now: NOW, frame: null }).image, `${kind}: frame: null must equal no frame`);
+  }
+  // Fire tongues are cubic paths with an opacity; none of the static art uses that shape.
+  const tongue = /<path d="M[^"]* C[^"]*" fill="#[0-9a-f]{6}" opacity="/;
+  for (const kind of ["approver-waiting", "approver-status", "usage-session", "sessions"]) {
+    assert.doesNotMatch(text(viewFor(kind, { state, now: NOW }).image), tongue, `${kind} burns without a frame`);
+    assert.match(text(viewFor(kind, { state, now: NOW, frame: 3 }).image), tongue, `${kind} does not burn with a frame`);
+  }
+  // Approve keys spark (circles) only with a frame and a fresh request.
+  assert.match(text(viewFor("approve-allow", { state, now: NOW, frame: 3 }).image), /<circle[^>]*opacity=/);
+});
+
+test("fx: a blocked key stops moving after PULSE_MS but still burns", () => {
+  const state = hotState();
+  state.sessions[0].statusUpdatedAt = NOW - PULSE_MS - 1;
+  const a = viewFor("approver-waiting", { state, now: NOW, frame: 3 }).image;
+  const b = viewFor("approver-waiting", { state, now: NOW, frame: 9 }).image;
+  assert.equal(a, b, "stale blocked key must be frozen at one frame");
+  assert.match(text(a), /<path d="M[^"]* C[^"]*" fill="#[0-9a-f]{6}" opacity="/);
+  const fresh = hotState();
+  assert.notEqual(viewFor("approver-waiting", { state: fresh, now: NOW, frame: 3 }).image, viewFor("approver-waiting", { state: fresh, now: NOW, frame: 9 }).image);
+});
+
+test("fx: a frame changes the pixels, never the words", () => {
+  const state = hotState();
+  const words = (img) => text(img).replace(/<[^>]+>/g, "").replace(/\s+/g, "");
+  for (const kind of ALL_KINDS) {
+    assert.equal(words(viewFor(kind, { state, now: NOW }).image), words(viewFor(kind, { state, now: NOW, frame: 5 }).image), kind);
+  }
+});
+
+test("waitHeat grows from a candle to a bonfire over HEAT_FULL_MS", () => {
+  assert.equal(waitHeat(null, NOW), 0.35);
+  assert.equal(waitHeat(NOW, NOW), 0.35);
+  assert.ok(waitHeat(NOW - HEAT_FULL_MS / 2, NOW) > 0.6 && waitHeat(NOW - HEAT_FULL_MS / 2, NOW) < 0.7);
+  assert.equal(waitHeat(NOW - 2 * HEAT_FULL_MS, NOW), 1);
+});
+
+test("animatingKinds: a calm deck animates nothing", () => {
+  assert.deepEqual(animatingKinds(emptyState(), NOW), []);
+  assert.deepEqual(animatingKinds({ ...emptyState(), sessions: [session()] }, NOW), []);
+});
+
+test("animatingKinds: gauges join at 50%, subscription or local", () => {
+  const sub = { ...emptyState(), usage: { fiveHour: { pct: 50 }, weekly: { pct: 49 }, models: [{ pct: 90 }] }, usageAt: NOW };
+  assert.deepEqual(animatingKinds(sub, NOW), ["usage-session", "usage-model"]);
+  const local = { ...emptyState(), usageErr: "no OAuth token in credentials file", usageMeter: { "5h": { cost: 6 }, "7day": { cost: 10 } } };
+  assert.deepEqual(animatingKinds(local, NOW, (k) => (k === "usage-session" ? 10 : 100)), ["usage-session"]);
+  assert.deepEqual(animatingKinds(local, NOW), [], "no budget = no percentage = no fire");
+});
+
+test("animatingKinds: sessions, status and waiting keys follow blocked and busy sessions", () => {
+  const busy = { ...emptyState(), sessions: [session({ status: "busy" })] };
+  assert.deepEqual(animatingKinds(busy, NOW), ["sessions", "approver-status"]);
+  const blocked = { ...emptyState(), sessions: [session({ status: "waiting", waitingFor: "permission prompt", statusUpdatedAt: NOW - 1000 })] };
+  assert.deepEqual(animatingKinds(blocked, NOW), ["sessions", "approver-status", "approver-waiting"]);
+  blocked.sessions[0].statusUpdatedAt = NOW - PULSE_MS;
+  assert.deepEqual(animatingKinds(blocked, NOW), ["sessions"], "a stale blocked key stops pulsing");
+});
+
+test("animatingKinds: the approve triad sparks only while a real request is fresh", () => {
+  const fresh = { ...emptyState(), approveQueue: [req()] };
+  assert.deepEqual(animatingKinds(fresh, NOW), ["approve-allow", "approve-always", "approve-deny"]);
+  const stale = { ...emptyState(), approveQueue: [req({ receivedAt: NOW - PULSE_MS })] };
+  assert.deepEqual(animatingKinds(stale, NOW), []);
+});
+
+// ---------- demo state (fx-demo flag file) ----------
+test("demo state lights every animated key kind and every key renders with it", () => {
+  const st = demoState(NOW);
+  const lit = animatingKinds(st, NOW);
+  for (const k of ["usage-session", "usage-weekly", "usage-model", "sessions", "approver-status", "approver-waiting", "approve-allow", "approve-always", "approve-deny"]) {
+    assert.ok(lit.includes(k), `${k} is not animated in the demo`);
+  }
+  for (const kind of ALL_KINDS) {
+    const { image } = viewFor(kind, { state: st, now: NOW, frame: 4 });
+    assert.ok(typeof image === "string" && image.startsWith("data:image/svg+xml,"), `${kind} drew nothing in the demo`);
+  }
+  assert.equal(DEMO_MS, 60_000);
+});
+
+test("demo state burns: hot gauge, blocked status, spark on approve", () => {
+  const st = demoState(NOW);
+  assert.match(drawn("usage-session", { state: st, frame: 2 }), /94%/);
+  assert.match(drawn("approver-waiting", { state: st, frame: 2 }), /Needs approval/);
+  assert.match(drawn("approve-allow", { state: st, frame: 2 }), /npm test/);
+});
+
+// ---------- Codex gauge + limit.json ----------
+test("Codex gauge shows the percentage and the reset countdown from limit.json", () => {
+  const state = { ...emptyState(), limit: { codex: { pct: 63, resetsAt: new Date(NOW + 2 * 3_600_000).toISOString(), at: NOW - 60_000 }, claude: null } };
+  const t = drawn("usage-codex", { state });
+  assert.match(t, /CODEX 5H/);
+  assert.match(t, /63%/);
+  assert.match(t, /2h 0m left/);
+});
+
+test("Codex gauge says no data / stale instead of a number it does not have", () => {
+  assert.match(drawn("usage-codex", { state: emptyState() }), /no data/);
+  const stale = { ...emptyState(), limit: { codex: { pct: 10, resetsAt: null, at: NOW - 41 * 60_000 }, claude: null } };
+  const t = drawn("usage-codex", { state: stale });
+  assert.match(t, /stale/);
+  assert.doesNotMatch(t, /10%/);
+});
+
+test("Codex gauge burns from 50% and not below, only while its reading is fresh", () => {
+  const mk = (pct, ageMs) => ({ ...emptyState(), limit: { codex: { pct, resetsAt: null, at: NOW - ageMs }, claude: null } });
+  assert.ok(animatingKinds(mk(63, 1000), NOW).includes("usage-codex"));
+  assert.ok(!animatingKinds(mk(30, 1000), NOW).includes("usage-codex"));
+  assert.ok(!animatingKinds(mk(63, 41 * 60_000), NOW).includes("usage-codex"));
+  const tongue = /<path d="M[^"]* C[^"]*" fill="#[0-9a-f]{6}" opacity="/;
+  assert.match(text(viewFor("usage-codex", { state: mk(63, 1000), now: NOW, frame: 3 }).image), tongue);
+  assert.doesNotMatch(text(viewFor("usage-codex", { state: mk(63, 1000), now: NOW }).image), tongue);
+});
+
+test("usage gauges: a stale last reading shows with its age, an expired 5h window does not", () => {
+  const now = 1_000_000_000_000;
+  const mk = (usageAt) => ({ usage: { fiveHour: { pct: 40 }, weekly: { pct: 33 } }, usageErr: "usage endpoint HTTP 429", usageAt, approveQueue: [], sessions: [] });
+  const st = (kind, usageAt) => viewFor(kind, { state: mk(usageAt), now }).image;
+  const none = viewFor("usage-weekly", { state: { ...mk(0), usage: null }, now }).image;
+  assert.notEqual(st("usage-weekly", now - 18 * 3600_000), none);          // weekly 18h old is shown
+  const noData = viewFor("usage-session", { state: { ...mk(0), usage: null }, now }).image;
+  assert.equal(st("usage-session", now - 18 * 3600_000), noData);          // 5h window 18h old has reset: no data
+  assert.notEqual(st("usage-session", now - 60 * 60_000), noData);         // 1h old is shown
 });

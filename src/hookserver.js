@@ -16,7 +16,7 @@ const sameSecret = (a, b) => {
   return A.length === B.length && timingSafeEqual(A, B);
 };
 
-export function startHookServer({ port, secret, onRequest, onDrop, log = () => {}, retries = 3, retryMs = 500 }) {
+export function startHookServer({ port, secret, onRequest, onDrop, usageSecret = null, onUsage = null, log = () => {}, retries = 3, retryMs = 500 }) {
   if (!secret || String(secret).length < 32) {
     return Promise.reject(new Error("hook secret too short"));
   }
@@ -27,8 +27,29 @@ export function startHookServer({ port, secret, onRequest, onDrop, log = () => {
   const stats = { badPathHits: [] };
   let boundPort = null;
 
+  const usagePath = usageSecret && String(usageSecret).length >= 32 && onUsage ? `/usage/${usageSecret}` : null;
   const server = createServer((req, res) => {
     const deny = (code) => { res.writeHead(code).end(); };
+    // Second route: a logged-in browser pushes claude.ai's usage JSON here (see AGENT_VITALS usage push).
+    // Its own secret, so the approve URL never leaves the hook config. Not counted as a bad-path hit.
+    if (usagePath && sameSecret(req.url ?? "", usagePath)) {
+      const host = String(req.headers.host ?? "");
+      if (host !== `127.0.0.1:${boundPort}` && host !== `localhost:${boundPort}`) return deny(403);
+      if (req.method !== "POST") return deny(405);
+      req.setEncoding("utf8");
+      let body = "", over = false;
+      req.on("data", (c) => { if (over) return; body += c; if (body.length > 256 * 1024) { over = true; res.writeHead(413).end(); } });
+      req.on("end", () => {
+        if (over) return;
+        let payload;
+        try { payload = JSON.parse(body || "{}"); } catch { return deny(400); }
+        let ok = false;
+        try { ok = !!onUsage(payload); } catch (e) { log("usage push threw:", String(e)); }
+        res.writeHead(ok ? 204 : 422).end();
+      });
+      req.on("error", () => {});
+      return;
+    }
     // Path is the credential. Exact match only - no query, no trailing segment.
     if (!sameSecret(req.url ?? "", wantPath)) {
       const now = Date.now();

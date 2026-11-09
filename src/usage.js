@@ -265,3 +265,40 @@ export function gaugeSource({ usage, usageErr, usageAt, now }, hasLocal = false)
   if (usageErr) return "error";
   return hasLocal ? "local" : "pending";
 }
+
+// ---------- limit.json (the Lab's limit gate) ----------
+// tools/limit/gate.mjs in overclock-lab writes E:\local-compute\limit.json every few
+// minutes: Claude and Codex 5-hour percentages with their reset times, and a `lastGood`
+// copy of each source's last successful reading. The plugin reads that file instead of
+// hammering the same rate-limited endpoint itself (the endpoint answers 429 to every
+// caller on a busy account, and one more poller only makes it worse). Codex has no other
+// source at all. Every reading carries its own age (`at`, ms) so a stale one is shown as
+// stale, never as live.
+export const LIMIT_FRESH_MS = 40 * 60_000;
+const pctNum = (v) => (Number.isFinite(Number(v)) && v !== null && v !== "" ? Math.max(0, Math.min(100, Number(v))) : null);
+const atMs = (v, fallback) => { const t = Date.parse(v); return Number.isFinite(t) ? t : fallback; };
+function limitSide(live, good, fileAt, extra) {
+  const pick = (r, at) => (r && pctNum(r.pct) != null ? { pct: pctNum(r.pct), resetsAt: r.resetsAt ?? null, ...extra(r), at } : null);
+  return pick(live, fileAt) ?? pick(good, atMs(good?.readAt, 0));
+}
+export function parseLimitFile(j) {
+  if (!j || typeof j !== "object") return { claude: null, codex: null, fileAt: 0 };
+  const fileAt = atMs(j.at, 0);
+  const claude = limitSide(j.claude, j.lastGood?.claude, fileAt, (r) => ({ week: pctNum(r.week) }));
+  const codex = limitSide(j.codex, j.lastGood?.codex, fileAt, () => ({}));
+  return { claude, codex, fileAt };
+}
+
+// Claude Desktop samples the plan's 5-hour (fh) and 7-day (sd) percentages into
+// plan-usage-history.json about every 15 minutes while it can reach its usage endpoint.
+// Only the newest sample counts; it carries its own timestamp so a stalled sampler reads as stale.
+export function parseDesktopHistory(j) {
+  const s = Array.isArray(j?.samples) ? j.samples : [];
+  let best = null;
+  for (const x of s) {
+    const at = Number(x?.t);
+    if (!Number.isFinite(at) || pctNum(x?.u?.fh) == null) continue;
+    if (!best || at > best.at) best = { pct: pctNum(x.u.fh), week: pctNum(x.u.sd), resetsAt: null, at };
+  }
+  return best;
+}

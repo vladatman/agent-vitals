@@ -13,7 +13,7 @@ import {
   C, gaugeKey, linesKey, bigCountKey, burnKey, usageMeterKey, labelKey, actionKey,
   statusKey, approveKey, fmtNum,
 } from "./keyart.js";
-import { budgetPct, gaugeSource, familyOf } from "./usage.js";
+import { budgetPct, gaugeSource, familyOf, LIMIT_FRESH_MS } from "./usage.js";
 import {
   resolveStatusKey, statusEntry, sessionWhere, fmtShort, shortWait, sessionState,
   blockedSessions,
@@ -29,6 +29,14 @@ const pendKindOf = (state, s) => state.pending?.get(s?.sessionId)?.kind ?? null;
 // animations this state does not self-terminate. Breathe long enough to catch the
 // eye, then hold static instead of pushing frames until morning.
 export const PULSE_MS = 120_000;
+
+// How hot a blocked key burns: a fresh request is a candle, three minutes unanswered is a
+// bonfire. Used only by the fire animation (env.frame != null); null since = just started.
+export const HEAT_FULL_MS = 180_000;
+export function waitHeat(since, now) {
+  if (!since) return 0.35;
+  return Math.max(0.35, Math.min(1, 0.35 + (0.65 * (now - since)) / HEAT_FULL_MS));
+}
 
 // ---------- formatting ----------
 // `now` is injected for the same reason viewFor injects it: without it the three
@@ -65,7 +73,7 @@ export function gaugeMode(state, kind, now) {
 // in the sub-line instead); without one it shows the absolute spend. A missing
 // aggregate renders "--" — never "$0.00", which would claim zero spend on a
 // machine that has spent hundreds today.
-export function localGauge(header, agg, budget, view = "cost", animPhase = null) {
+export function localGauge(header, agg, budget, view = "cost", animPhase = null, fx = null) {
   if (!agg) return usageMeterKey(header, "--", "no data yet", true);
   // Token view: the grand total big, with the plain input/output split beneath,
   // since that is what you compare against a provider's per-token billing.
@@ -75,7 +83,7 @@ export function localGauge(header, agg, budget, view = "cost", animPhase = null)
   const pct = budgetPct(agg.cost, budget);
   if (pct == null) return usageMeterKey(header, "$" + agg.cost.toFixed(2), "est", true);
   const over = pct > 100 ? " · " + Math.round(pct) + "%" : "";
-  return gaugeKey(header, pct, `$${Math.round(agg.cost)} / $${Math.round(Number(budget))}${over}`, pct >= 90 ? animPhase : null);
+  return gaugeKey(header, pct, `$${Math.round(agg.cost)} / $${Math.round(Number(budget))}${over}`, pct >= 90 ? animPhase : null, fx);
 }
 
 // The models a Model key can rotate through: subscription buckets, or the local
@@ -124,6 +132,76 @@ export function sessionEta(state, now) {
   return hh > 0 ? `cap in ~${hh}h ${mm}m` : `cap in ~${mm}m`;
 }
 
+// ---------- fire ticker gate ----------
+// Which key kinds have something MOVING right now, so the fx ticker repaints only
+// those. Everything else keeps whatever frame it was last drawn with (the fire on a
+// stale blocked key is frozen at frame 0 by viewFor, a gauge under 50% has no fire).
+// Pure so the gate is testable; `budgetFor(kind)` supplies the per-key budget setting
+// that a local gauge needs to know its percentage.
+export const FX_GAUGE_PCT = 50;
+export const APPROVE_KINDS = ["approve-allow", "approve-always", "approve-deny"];
+export function animatingKinds(state, now, budgetFor = () => undefined) {
+  const kinds = [];
+  for (const kind of Object.keys(GAUGE_WINDOW)) {
+    const mode = gaugeMode(state, kind, now);
+    let pct = null;
+    if (mode === "subscription") {
+      const b = kind === "usage-session" ? state.usage?.fiveHour : kind === "usage-weekly" ? state.usage?.weekly : (state.usage?.models ?? [])[0];
+      pct = b?.pct ?? null;
+    } else if (mode === "local") {
+      const agg = kind === "usage-model" ? (state.usageMeterModels ?? [])[0] : state.usageMeter?.[GAUGE_WINDOW[kind]];
+      pct = agg ? budgetPct(agg.cost, budgetFor(kind)) : null;
+    }
+    if (pct != null && pct >= FX_GAUGE_PCT) kinds.push(kind);
+  }
+  const codex = state.limit?.codex;
+  if (codex && now - codex.at <= LIMIT_FRESH_MS && codex.pct >= FX_GAUGE_PCT) kinds.push("usage-codex");
+  const st = (s) => sessionState(s, now, state.activity?.get(s.sessionId) ?? null, pendKindOf(state, s));
+  const working = (state.sessions ?? []).some((s) => st(s) === "working");
+  const blocked = blockedSessions(state.sessions, now, state.activity, state.pending);
+  const freshBlocked = blocked.some((b) => {
+    const since = b.statusUpdatedAt ?? state.pending?.get(b.sessionId)?.since ?? null;
+    return !since || now - since < PULSE_MS;
+  });
+  if (working || blocked.length) kinds.push("sessions");
+  if (working || freshBlocked) kinds.push("approver-status");
+  if (freshBlocked) kinds.push("approver-waiting");
+  const req = approvable(state.approveQueue);
+  if (req && now - req.receivedAt < PULSE_MS) kinds.push(...APPROVE_KINDS);
+  return kinds;
+}
+
+// ---------- demo state ----------
+// A made-up, deliberately hot state for showing the fire on a calm deck: one session
+// blocked 90 s, one working, one finished, one idle, 94 % / 62 % / 78 % gauges and a
+// fresh approve request. plugin.js swaps it in for 60 s when an `fx-demo` file appears
+// in the plugin folder, and never lets it answer anything (the press guard sees no
+// painted request id while the demo is on).
+export const DEMO_MS = 60_000;
+export function demoState(now) {
+  const base = { cwd: "/demo", entrypoint: "cli", updatedAt: now, startedAt: now - 3_600_000 };
+  const reset = (d) => new Date(now + d).toISOString();
+  return {
+    sessions: [
+      { ...base, sessionId: "demo1", pid: 90001, name: "overclock-lab", cwd: "/demo/overclock-lab", status: "waiting", waitingFor: "permission prompt", statusUpdatedAt: now - 90_000 },
+      { ...base, sessionId: "demo2", pid: 90002, name: "kraken-ai-bot", cwd: "/demo/kraken-ai-bot", status: "busy" },
+      { ...base, sessionId: "demo3", pid: 90003, name: "pc-health", cwd: "/demo/pc-health", status: "idle", updatedAt: now - 20_000 },
+      { ...base, sessionId: "demo4", pid: 90004, name: "agent-vitals", cwd: "/demo/agent-vitals", status: "idle", updatedAt: now - 3_000_000 },
+    ],
+    activity: new Map(), pending: new Map(),
+    usage: {
+      fiveHour: { pct: 94, resetsAt: reset(3_900_000) },
+      weekly: { pct: 62, resetsAt: reset(3 * 86_400_000) },
+      models: [{ name: "opus", model: "opus", pct: 78, resetsAt: reset(2 * 86_400_000) }],
+    },
+    limit: { codex: { pct: 63, resetsAt: reset(2 * 3_600_000), at: now }, claude: null },
+    usageErr: null, usageAt: now, usageMeter: null, usageMeterModels: null,
+    today: { chats: 16, msgs: 804, tokens: 95_400_000 }, burn: { tokensHour: 43_800_000 },
+    pctHistory: [], denies: [], hookErr: null,
+    approveQueue: [{ id: -1, receivedAt: now - 3_000, toolName: "Bash", cwd: "/demo/overclock-lab", toolInput: { command: "npm test" }, suggestions: [] }],
+  };
+}
+
 // ---------- the view ----------
 // `env` carries everything the switch used to read from module scope:
 //   state           the data state (usage, sessions, approveQueue, …)
@@ -141,25 +219,48 @@ export function sessionEta(state, now) {
 // Returns { image, painted }. `painted` is set only by the approve keys, which must
 // record the request id and rule they actually drew so a press cannot answer
 // something the user never saw; the caller stores it.
+// Last known reading shown as stale instead of a bare "--": an old number with its age beats none.
+// A 5-hour window older than 5 hours has reset, so it is not shown.
+function staleAge(now, at) {
+  const m = Math.max(0, Math.round((now - (at ?? 0)) / 60_000));
+  return m < 90 ? `${m}m old` : m < 48 * 60 ? `${Math.round(m / 60)}h old` : `${Math.round(m / 1440)}d old`;
+}
+function staleReading(state, now, pct, maxAgeMs) {
+  const at = state.usageAt ?? 0;
+  if (pct == null || !at || now - at > maxAgeMs) return null;
+  return { pct, sub: staleAge(now, at) };
+}
+
 export function viewFor(kind, env) {
   const {
     state, settings = {}, now, animPhase = null, usageViewMode = "cost",
     pressedModelIdx = null, cycleIdx = -1, focus = null, autoSlot = 0,
-    authFlagged = false, defaultCodeDir = "",
+    authFlagged = false, defaultCodeDir = "", frame = null,
   } = env;
+  // `frame` (an integer, one fx cycle = FX_FRAMES) switches the fire animation on.
+  // Absent, every key renders exactly as before.
+  const FX = frame != null ? { frame } : null;
   const img = (image) => ({ image });
 
   switch (kind) {
     case "usage-session": {
       const mode = gaugeMode(state, "usage-session", now);
-      if (mode === "local") return img(localGauge("LAST 5H", state.usageMeter?.["5h"], settings.budget, usageViewMode, animPhase));
+      if (mode === "local") return img(localGauge("LAST 5H", state.usageMeter?.["5h"], settings.budget, usageViewMode, animPhase, FX));
+      if (mode !== "subscription") {
+        const st = staleReading(state, now, state.usage?.fiveHour?.pct, 5 * 3600_000);
+        if (st) return img(gaugeKey("SESSION 5H", st.pct, st.sub));
+      }
       if (mode !== "subscription") return img(gaugeKey("SESSION 5H", null, mode === "throttled" ? "throttled" : mode === "error" ? "sign in?" : "no data"));
       const b = state.usage?.fiveHour;
-      return img(gaugeKey("SESSION 5H", b?.pct ?? null, b ? fmtReset(b.resetsAt, now) : "no data", b?.pct >= 90 ? animPhase : null));
+      return img(gaugeKey("SESSION 5H", b?.pct ?? null, b ? fmtReset(b.resetsAt, now) : "no data", b?.pct >= 90 ? animPhase : null, FX));
     }
     case "usage-weekly": {
       const mode = gaugeMode(state, "usage-weekly", now);
-      if (mode === "local") return img(localGauge("LAST 7D", state.usageMeter?.["7day"], settings.budget, usageViewMode, animPhase));
+      if (mode === "local") return img(localGauge("LAST 7D", state.usageMeter?.["7day"], settings.budget, usageViewMode, animPhase, FX));
+      if (mode !== "subscription") {
+        const st = staleReading(state, now, state.usage?.weekly?.pct, 7 * 86400_000);
+        if (st) return img(gaugeKey("WEEKLY", st.pct, st.sub));
+      }
       if (mode !== "subscription") return img(gaugeKey("WEEKLY", null, mode === "throttled" ? "throttled" : mode === "error" ? "sign in?" : "no data"));
       const b = state.usage?.weekly;
       const u = state.usage;
@@ -167,7 +268,7 @@ export function viewFor(kind, env) {
         ? `${u.scopedName} ${Math.round(u.scopedPct)}%`
         : u?.weeklyOpus?.pct != null ? `opus ${Math.round(u.weeklyOpus.pct)}%`
         : b ? fmtReset(b.resetsAt, now) : "no data";
-      return img(gaugeKey("WEEKLY", b?.pct ?? null, sub, b?.pct >= 90 ? animPhase : null));
+      return img(gaugeKey("WEEKLY", b?.pct ?? null, sub, b?.pct >= 90 ? animPhase : null, FX));
     }
     case "usage-model": {
       const mmode = gaugeMode(state, "usage-model", now);
@@ -182,9 +283,16 @@ export function viewFor(kind, env) {
       const more = list.length > 1 ? ` ${i + 1}/${list.length}` : "";
       if (!pick) return img(usageMeterKey(head_, "--", mmode === "local" ? "no data yet" : "no data", true));
       if (mmode === "local") {
-        return img(localGauge(head_ + more, pick, settings.budget, usageViewMode, animPhase));
+        return img(localGauge(head_ + more, pick, settings.budget, usageViewMode, animPhase, FX));
       }
-      return img(gaugeKey(head_ + more, pick.pct ?? null, pick.resetsAt ? fmtReset(pick.resetsAt, now) : "no data", pick.pct >= 90 ? animPhase : null));
+      return img(gaugeKey(head_ + more, pick.pct ?? null, pick.resetsAt ? fmtReset(pick.resetsAt, now) : "no data", pick.pct >= 90 ? animPhase : null, FX));
+    }
+    case "usage-codex": {
+      // Codex has no other source than the Lab limit gate's limit.json (state.limit).
+      const c = state.limit?.codex;
+      if (!c) return img(gaugeKey("CODEX 5H", null, "no data"));
+      if (now - c.at > LIMIT_FRESH_MS) return img(gaugeKey("CODEX 5H", null, "stale"));
+      return img(gaugeKey("CODEX 5H", c.pct, c.resetsAt ? fmtReset(c.resetsAt, now) : "", c.pct >= 90 ? animPhase : null, FX));
     }
     case "burn-rate":
       return img(burnKey(state.burn?.tokensHour ?? null, sessionEta(state, now)));
@@ -244,7 +352,8 @@ export function viewFor(kind, env) {
       const busy = state.sessions.filter((s) => sessionState(s, now, state.activity.get(s.sessionId) ?? null, pendKindOf(state, s)) === "working").length;
       const sub = blocked > 0 ? `${blocked} needs you` : busy > 0 ? `${busy} working` : n > 0 ? "all idle" : "none running";
       const subCol = blocked > 0 ? C.warn : busy > 0 ? C.info : C.dim;
-      return img(bigCountKey("CLAUDE CODE", n, sub, subCol, busy > 0 ? animPhase : null, blocked > 0 ? C.warn : busy > 0 ? C.info : null, blocked > 0));
+      return img(bigCountKey("SESSIONS", n, sub, subCol, busy > 0 ? animPhase : null, blocked > 0 ? C.warn : busy > 0 ? C.info : null, blocked > 0,
+        FX && n > 0 ? { frame, states: state.sessions.map((s) => sessionState(s, now, state.activity.get(s.sessionId) ?? null, pendKindOf(state, s))) } : null));
     }
     case "today": {
       const t = state.today;
@@ -287,14 +396,15 @@ export function viewFor(kind, env) {
       }
       const blockedNow = entry.state === "needs-approval" || entry.state === "input-needed";
       const fresh = blockedNow && (!entry.waitingSince || now - entry.waitingSince < PULSE_MS);
-      return img(statusKey(name, entry.state, explicit ? resolved.count : 1, detail, entry.where, fresh ? animPhase : null));
+      return img(statusKey(name, entry.state, explicit ? resolved.count : 1, detail, entry.where, fresh ? animPhase : null,
+        FX ? { frame: !blockedNow || fresh ? frame : 0, heat: blockedNow ? waitHeat(entry.waitingSince, now) : 0.3 } : null));
     }
     case "approver-waiting": {
       // Dark and quiet until a session is actually blocked on you.
       const blocked = blockedSessions(state.sessions, now, state.activity, state.pending);
       if (!blocked.length) {
         const n = state.sessions.length;
-        return img(statusKey("WAITING", "quiet", 1, n ? `${n} session${n > 1 ? "s" : ""} ok` : "no sessions"));
+        return img(statusKey("NEEDS YOU", "quiet", 1, n ? `${n} session${n > 1 ? "s" : ""} ok` : "no sessions"));
       }
       const i = cycleIdx >= 0 ? cycleIdx % blocked.length : 0;
       const b = blocked[i];
@@ -307,7 +417,8 @@ export function viewFor(kind, env) {
       const waited = since ? fmtShort(now - since) : "";
       const why = shortWait(b.waitingFor ?? p?.reason ?? "") || "needs you";
       const fresh = !since || now - since < PULSE_MS;
-      return img(statusKey(path.basename(b.cwd ?? "") || "claude", st, blocked.length, why + (waited ? " · " + waited : ""), sessionWhere(b), fresh ? animPhase : null));
+      return img(statusKey(path.basename(b.cwd ?? "") || "claude", st, blocked.length, why + (waited ? " · " + waited : ""), sessionWhere(b), fresh ? animPhase : null,
+        FX ? { frame: fresh ? frame : 0, heat: waitHeat(since, now) } : null));
     }
     case "approve-allow":
     case "approve-always":
@@ -330,6 +441,7 @@ export function viewFor(kind, env) {
           err,
           depth: approvableDepth(state.approveQueue),
           phase: fresh ? animPhase : null,
+          fx: fresh && FX ? FX : null,
           denied: kind === "approve-always" && req ? denyBlock(state.denies, req, now) : null,
         }),
         // What this key is PAINTING. The press guard compares against it, so a press

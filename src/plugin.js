@@ -9,7 +9,7 @@ import path from "node:path";
 import { spawn, execFile } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { escapeAppleScript, parseHotkey, hotkeyClause, classifyCustomCommand, parseKeychainToken, parsePsTree, hostAppForPid, focusStrategyForBundle, terminalFocusScript, parseProcStarts } from "./osa.js";
-import { windowStartMs, parseRequests, mergeById, aggregate, aggregateByModel, budgetPct, localDay, newDayCounts, foldDayChunk, dayCountsTotals } from "./usage.js";
+import { parseLimitFile, parseDesktopHistory, LIMIT_FRESH_MS, windowStartMs, parseRequests, mergeById, aggregate, aggregateByModel, budgetPct, localDay, newDayCounts, foldDayChunk, dayCountsTotals } from "./usage.js";
 import { resolveStatusKey, statusEntry, autoSlot, sessionState, blockedSessions, sessionSig, transcriptPathFor, pidLooksRecycled } from "./status.js";
 import { randomBytes } from "node:crypto";
 import {
@@ -20,8 +20,9 @@ import {
 } from "./approve.js";
 import { startHookServer, BADPATH_WINDOW_MS, BADPATH_MIN_HITS } from "./hookserver.js";
 import {
-  viewFor, gaugeMode, GAUGE_WINDOW, modelList, modelListIndex, sessionEta, PULSE_MS,
+  viewFor, gaugeMode, GAUGE_WINDOW, modelList, modelListIndex, sessionEta, PULSE_MS, animatingKinds, demoState, DEMO_MS,
 } from "./view.js";
+import { FX_FRAMES } from "./fx.js";
 
 const IS_MAC = process.platform === "darwin";
 
@@ -83,6 +84,7 @@ const state = {
   usageMeter: null,   // { [window]: {tokens, cost, in, out} } from pollUsageMeter
   usageMeterModels: null, // [{model,tokens,cost}] over 7d, for the model key in local mode
   usageAt: 0,
+  limit: null,        // { claude, codex } from the Lab limit gate's limit.json (see pollLimitFile)
   sessions: [],
   today: null,
   burn: null,
@@ -124,7 +126,106 @@ try {
   if (Date.now() - c.at < 30 * 60_000) { state.usage = c.usage; state.usageAt = c.at; }
 } catch {}
 
+// The Lab limit gate (overclock-lab tools/limit/gate.mjs) writes Claude and Codex 5-hour
+// percentages here every few minutes. One shared reader beats a second poller on an endpoint
+// that answers 429 to everyone; Codex has no other source. Override with AGENT_VITALS_LIMIT_FILE
+// (empty string turns the reader off).
+const LIMIT_FILE = process.env.AGENT_VITALS_LIMIT_FILE ?? (IS_MAC ? "" : "E:\\local-compute\\limit.json");
+// Claude Desktop's own sampler file; the fallback for Claude percentages when the gate has none or an older one.
+const DESKTOP_HISTORY_FILE = process.env.AGENT_VITALS_DESKTOP_USAGE_FILE ??
+  (IS_MAC ? path.join(os.homedir(), "Library", "Application Support", "Claude", "plan-usage-history.json")
+    : path.join(process.env.APPDATA ?? "", "Claude", "plan-usage-history.json"));
+const limitClaudeFresh = () => !!state.limit?.claude && Date.now() - state.limit.claude.at < 15 * 60_000;
+// Mirror of claude.ai's own usage API ({ at, raw }), written by whatever holds a logged-in browser session.
+// The web API answers with the same JSON as the OAuth endpoint, which currently answers 429.
+const WEB_USAGE_FILE = process.env.AGENT_VITALS_WEB_USAGE_FILE ?? (IS_MAC ? "" : "E:\\local-compute\\claude-web-usage.json");
+function applyWebUsage(raw, at) {
+  if (!Number.isFinite(at) || !raw || typeof raw !== "object" || at <= state.usageAt) return false;
+  if (!raw.five_hour && !Array.isArray(raw.limits)) return false;
+  state.usage = usageFromJson(raw);
+  state.usageErr = null;
+  state.usageAt = at;
+  const fp5 = state.usage.fiveHour?.pct;
+  if (typeof fp5 === "number") state.pctHistory = [...state.pctHistory.filter((h) => at - h.t < 3.6e6 && h.t < at), { t: at, pct: fp5 }];
+  return true;
+}
+async function pollWebUsage() {
+  if (!WEB_USAGE_FILE) return false;
+  let m;
+  try { m = JSON.parse(await fsp.readFile(WEB_USAGE_FILE, "utf8")); } catch { return false; }
+  return applyWebUsage(m?.raw, Number(m?.at));
+}
+// A logged-in browser (userscript) POSTs { raw } to the hook server's /usage/<token>. The token lives outside
+// PLUGIN_DIR (deploys wipe it) and is separate from the approve secret.
+const USAGE_TOKEN_FILE = path.join(os.homedir(), ".agent-vitals", "usage-push-token");
+function usagePushToken() {
+  try { const t = fs.readFileSync(USAGE_TOKEN_FILE, "utf8").trim(); if (t.length >= 32) return t; } catch {}
+  const t = randomBytes(24).toString("hex");
+  try { fs.mkdirSync(path.dirname(USAGE_TOKEN_FILE), { recursive: true }); fs.writeFileSync(USAGE_TOKEN_FILE, t + "\n", { mode: 0o600 }); } catch {}
+  return t;
+}
+function onUsagePush(payload) {
+  const at = Date.now();
+  if (!applyWebUsage(payload?.raw, at)) return false;
+  if (WEB_USAGE_FILE) { try { fs.writeFileSync(WEB_USAGE_FILE, JSON.stringify({ at, raw: payload.raw })); } catch (e) { log("usage mirror write failed:", String(e.message ?? e)); } }
+  renderAll(["usage-session", "usage-weekly", "usage-model", "burn-rate"]);
+  return true;
+}
+async function pollLimitFile() {
+  const webNew = await pollWebUsage();
+  if (!LIMIT_FILE) { if (webNew) renderAll(["usage-session", "usage-weekly", "usage-model", "burn-rate"]); return; }
+  let parsed;
+  try { parsed = parseLimitFile(JSON.parse(await fsp.readFile(LIMIT_FILE, "utf8"))); } catch { return; }
+  let c = parsed.claude;
+  if (DESKTOP_HISTORY_FILE) {
+    let d = null;
+    try { d = parseDesktopHistory(JSON.parse(await fsp.readFile(DESKTOP_HISTORY_FILE, "utf8"))); } catch {}
+    if (d && (!c || d.at > c.at)) c = { ...d, week: d.week ?? c?.week ?? null, resetsAt: c?.resetsAt ?? null };
+  }
+  const before = JSON.stringify(state.limit);
+  state.limit = { claude: c, codex: parsed.codex };
+  // A Claude reading newer than our own (or when our own endpoint is failing) feeds the Session and
+  // Weekly gauges, so they come back even while this plugin's own call keeps getting 429.
+  if (c && c.at > state.usageAt) {
+    const prev = state.usage ?? {};
+    state.usage = { ...prev, fiveHour: { pct: c.pct, resetsAt: c.resetsAt }, ...(c.week != null ? { weekly: { pct: c.week, resetsAt: prev.weekly?.resetsAt ?? null } } : {}) };
+    state.usageErr = null;
+    state.usageAt = c.at;
+  }
+  if (webNew || JSON.stringify(state.limit) !== before || c) renderAll(["usage-session", "usage-weekly", "usage-model", "usage-codex", "burn-rate"]);
+}
+
+// Usage object from the /usage JSON (same shape from the OAuth endpoint and from claude.ai's own web API).
+function usageFromJson(j) {
+    const limits = Array.isArray(j.limits) ? j.limits : [];
+    const fromLimit = (kind) => {
+      const l = limits.find((x) => x.kind === kind);
+      return l ? { pct: l.percent, resetsAt: l.resets_at } : null;
+    };
+    const scoped = limits.find((x) => x.kind === "weekly_scoped");
+    // Every per-model bucket the account exposes, for the selectable model gauge
+    const models = [];
+    for (const l of limits) {
+      if (l.kind !== "weekly_scoped") continue;
+      const name = l.scope?.model?.display_name;
+      if (name && typeof l.percent === "number") models.push({ name, pct: l.percent, resetsAt: l.resets_at ?? null });
+    }
+    for (const [key, name] of [["seven_day_opus", "Opus"], ["seven_day_sonnet", "Sonnet"]]) {
+      const b = pickBucket(j[key]);
+      if (b?.pct != null && !models.some((m) => m.name === name)) models.push({ name, pct: b.pct, resetsAt: b.resetsAt });
+    }
+    return {
+      fiveHour: pickBucket(j.five_hour) ?? fromLimit("session"),
+      weekly: pickBucket(j.seven_day) ?? fromLimit("weekly_all"),
+      weeklyOpus: pickBucket(j.seven_day_opus),
+      scopedPct: scoped?.percent ?? null,
+      scopedName: scoped?.scope?.model?.display_name ?? null,
+      models,
+    };
+}
+
 async function pollUsage() {
+  if (limitClaudeFresh() || Date.now() - state.usageAt < 10 * 60_000) return;   // the gate already has a fresh reading: do not add to the 429s
   lastUsageAttempt = Date.now();
   try {
     const token = await platform.readToken();
@@ -144,31 +245,7 @@ async function pollUsage() {
       state.loggedRaw = true;
       log("usage raw shape:", JSON.stringify(j).slice(0, 1200));
     }
-    const limits = Array.isArray(j.limits) ? j.limits : [];
-    const fromLimit = (kind) => {
-      const l = limits.find((x) => x.kind === kind);
-      return l ? { pct: l.percent, resetsAt: l.resets_at } : null;
-    };
-    const scoped = limits.find((x) => x.kind === "weekly_scoped");
-    // Every per-model bucket the account exposes, for the selectable model gauge
-    const models = [];
-    for (const l of limits) {
-      if (l.kind !== "weekly_scoped") continue;
-      const name = l.scope?.model?.display_name;
-      if (name && typeof l.percent === "number") models.push({ name, pct: l.percent, resetsAt: l.resets_at ?? null });
-    }
-    for (const [key, name] of [["seven_day_opus", "Opus"], ["seven_day_sonnet", "Sonnet"]]) {
-      const b = pickBucket(j[key]);
-      if (b?.pct != null && !models.some((m) => m.name === name)) models.push({ name, pct: b.pct, resetsAt: b.resetsAt });
-    }
-    state.usage = {
-      fiveHour: pickBucket(j.five_hour) ?? fromLimit("session"),
-      weekly: pickBucket(j.seven_day) ?? fromLimit("weekly_all"),
-      weeklyOpus: pickBucket(j.seven_day_opus),
-      scopedPct: scoped?.percent ?? null,
-      scopedName: scoped?.scope?.model?.display_name ?? null,
-      models,
-    };
+    state.usage = usageFromJson(j);
     state.usageErr = null;
     state.usageAt = Date.now();
     const fp5 = state.usage.fiveHour?.pct;
@@ -502,7 +579,7 @@ async function ensureHookServerOnce() {
   const previous = hookServer;
   try {
     const next = await startHookServer({
-      port, secret, onRequest: onHookRequest, onDrop: onHookDrop, log,
+      port, secret, onRequest: onHookRequest, onDrop: onHookDrop, usageSecret: usagePushToken(), onUsage: onUsagePush, log,
     });
     // Requests held by the old server belong to a socket we are about to drop.
     if (previous && state.approveQueue.length) {
@@ -770,6 +847,24 @@ const shownReq = new Map();  // context -> the approve request id this key last 
 const shownRule = new Map(); // context -> the ALWAYS rule text this key last PAINTED
 let ws = null;
 let animPhase = 0;
+// Fire animation (fx.js). One cycle is FX_FRAMES frames at FX_FPS; every render passes
+// the current frame so the 600 ms ticker, the pollers and the fx ticker all draw the
+// same look, and the fx ticker only adds repaints for the keys that are moving. The
+// whole layer switches off with AGENT_VITALS_FX=0 (every key then draws as before).
+const FX_ON = process.env.AGENT_VITALS_FX !== "0";
+const FX_FPS = 8;
+// setImage pushes a full 144x144 PNG over USB; Stream Deck throttles past ~50/s and
+// drops frames. Above the cap the fx ticker lowers its frame rate for ALL keys
+// evenly rather than letting some keys stutter.
+const FX_MAX_IMAGES_PER_S = 48;
+let fxFrame = 0;
+// Demo: dropping a file named `fx-demo` into the plugin folder (cwd) shows a made-up hot
+// state on every key for DEMO_MS after the file's mtime, then everything repaints for real.
+const FX_DEMO_FILE = path.join(process.cwd(), "fx-demo");
+let fxDemo = false;
+const fxDemoWanted = () => {
+  try { return Date.now() - fs.statSync(FX_DEMO_FILE).mtimeMs < DEMO_MS; } catch { return false; }
+};
 let lastSessionSig = ""; // previous tick's session signature (see pollSessions)
 
 function send(obj) {
@@ -788,10 +883,11 @@ function render(context, kind) {
   const v = views.get(context);
   const cy = cycle.get(context);
   const { image, painted } = viewFor(kind, {
-    state,
+    state: fxDemo ? demoState(Date.now()) : state,
     settings: v?.settings ?? {},
     now: Date.now(),
     animPhase,
+    frame: FX_ON ? fxFrame : null,
     usageViewMode: usageView.get(context) ?? "cost",
     pressedModelIdx: modelIdx.get(context) ?? null,
     cycleIdx: cy && cy.idx >= 0 ? cy.idx : -1,
@@ -800,7 +896,7 @@ function render(context, kind) {
     authFlagged: authFlagged(),
     defaultCodeDir: DEFAULT_CODE_DIR,
   });
-  if (painted) {
+  if (painted && !fxDemo) {
     shownReq.set(context, painted.reqId);
     shownRule.set(context, painted.rule);
   }
@@ -1157,6 +1253,9 @@ function onKeyDown(context, kind) {
       else if (Date.now() - lastUsageAttempt > 30_000) pollUsage();
       return render(context, "usage-model");
     }
+    case "usage-codex":
+      pollLimitFile();   // the gate refreshes the file itself; a press just re-reads it
+      return render(context, "usage-codex");
     case "burn-rate":
       pollBurn();
       return;
@@ -1428,6 +1527,8 @@ if (process.argv.includes("--selftest")) {
 
   (function usageLoop() { setTimeout(async () => { await pollUsage(); usageLoop(); }, usageDelay); })();
   setInterval(pollSessions, 5_000);
+  pollLimitFile();
+  setInterval(pollLimitFile, 30_000);
   setInterval(pollToday, 300_000);
   pollBurn();
   setInterval(pollBurn, 60_000);
@@ -1438,6 +1539,7 @@ if (process.argv.includes("--selftest")) {
     const kinds = [];
     if (state.sessions.some((s) => sessionState(s, Date.now(), state.activity.get(s.sessionId) ?? null, state.pending.get(s.sessionId)?.kind ?? null) === "working")) kinds.push("sessions");
     if (state.usage?.fiveHour?.pct >= 90) kinds.push("usage-session");
+    if (state.limit?.codex?.pct >= 90 && Date.now() - state.limit.codex.at < LIMIT_FRESH_MS) kinds.push("usage-codex");
     if (state.usage?.weekly?.pct >= 90) kinds.push("usage-weekly");
     if ((state.usage?.models ?? []).some((m) => m.pct >= 90)) kinds.push("usage-model");
     // Local/budget rings live outside state.usage, so gate them separately or a
@@ -1480,9 +1582,38 @@ if (process.argv.includes("--selftest")) {
       .some((b) => b?.resetsAt && Date.now() - new Date(b.resetsAt).getTime() > 5000);
     if (expired && !state.usageErr && Date.now() - lastUsageAttempt > 30_000) pollUsage();
   }, 600);
+  // Fire ticker: 8 fps, only the keys with something moving (see animatingKinds).
+  // Independent of the 600 ms ticker above, which stays as the fallback and still
+  // repaints its kinds (with the current frame, so the two never disagree).
+  if (FX_ON) {
+    let fxTick = 0;
+    const perTick = Math.max(1, Math.floor(FX_MAX_IMAGES_PER_S / FX_FPS));
+    setInterval(() => {
+      fxFrame = (fxFrame + 1) % FX_FRAMES;
+      fxTick++;
+      const now = Date.now();
+      if (fxTick % FX_FPS === 0) {
+        const want = fxDemoWanted();
+        if (want !== fxDemo) {
+          fxDemo = want;
+          log(fxDemo ? "fx demo on" : "fx demo off");
+          for (const [c, v] of views) render(c, v.kind);   // swap every key to / from the demo look at once
+        }
+      }
+      const kinds = animatingKinds(fxDemo ? demoState(now) : state, now, (k) => [...views.values()].find((v) => v.kind === k)?.settings?.budget);
+      if (!kinds.length) return;
+      const live = [...views.entries()].filter(([, v]) => kinds.includes(v.kind));
+      if (!live.length) return;
+      // 6 keys at 8 fps fit the cap; 12 keys drop to 4 fps, 18 to ~2.7 fps. The frame
+      // counter still advances every tick, so motion speed stays the same, only smoothness drops.
+      const every = Math.ceil(live.length / perTick);
+      if (fxTick % every) return;
+      for (const [context, v] of live) render(context, v.kind);
+    }, Math.round(1000 / FX_FPS));
+  }
   // Keep countdowns ("1h 5m left") fresh between polls
   setInterval(() => {
-    renderAll(["usage-session", "usage-weekly", "usage-model", "burn-rate", "approver-status", "approver-waiting", "focus-session", ...APPROVE_KINDS]);
+    renderAll(["usage-session", "usage-weekly", "usage-model", "usage-codex", "burn-rate", "approver-status", "approver-waiting", "focus-session", ...APPROVE_KINDS]);
     // Self-heal a failed bind: nothing else retries after the initial attempts.
     if (state.hookErr) ensureHookServer();
   }, 30_000);

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { windowStartMs, rateFor, estimateCost, parseRequests, mergeById, aggregate, familyOf, aggregateByModel, budgetPct, gaugeSource, hasSubscriptionData, USAGE_FRESH_MS, newDayCounts, foldDayChunk, dayCountsTotals } from "../src/usage.js";
+import { windowStartMs, rateFor, estimateCost, parseRequests, mergeById, aggregate, familyOf, aggregateByModel, budgetPct, gaugeSource, hasSubscriptionData, parseLimitFile, parseDesktopHistory, LIMIT_FRESH_MS, USAGE_FRESH_MS, newDayCounts, foldDayChunk, dayCountsTotals } from "../src/usage.js";
 
 test("windowStartMs 7day is exactly now - 7 days", () => {
   const now = 1_800_000_000_000;
@@ -457,4 +457,43 @@ test("foldDayChunk skips malformed and blank lines", () => {
   const c = newDayCounts("2026-07-28");
   foldDayChunk(c, ["", "not json", "{oops", dayLine({})].join("\n"));
   assert.equal(dayCountsTotals(c).msgs, 1);
+});
+
+// ---------- limit.json (Lab limit gate) ----------
+test("parseLimitFile: Claude 429 + Codex ok (the real file on a throttled day)", () => {
+  const j = { at: "2026-11-09T18:18:17.877Z", claude: { error: "HTTP 429" }, codex: { pct: 0, resetsAt: "2026-11-09T23:18:19.000Z" },
+    lastGood: { codex: { pct: 0, resetsAt: "2026-11-09T23:18:19.000Z", readAt: "2026-11-09T18:18:17.877Z" } } };
+  const r = parseLimitFile(j);
+  assert.equal(r.claude, null);
+  assert.deepEqual(r.codex, { pct: 0, resetsAt: "2026-11-09T23:18:19.000Z", at: Date.parse("2026-11-09T18:18:17.877Z") });
+  assert.equal(r.fileAt, Date.parse("2026-11-09T18:18:17.877Z"));
+});
+
+test("parseLimitFile: Claude reading with week, and lastGood fallback with its own age", () => {
+  const ok = parseLimitFile({ at: "2026-11-09T10:00:00Z", claude: { pct: 43, week: 61, resetsAt: "2026-11-09T12:00:00Z" } });
+  assert.equal(ok.claude.pct, 43);
+  assert.equal(ok.claude.week, 61);
+  assert.equal(ok.claude.at, Date.parse("2026-11-09T10:00:00Z"));
+  const old = parseLimitFile({ at: "2026-11-09T10:00:00Z", claude: { error: "HTTP 429" }, lastGood: { claude: { pct: 71, resetsAt: null, readAt: "2026-11-09T08:00:00Z" } } });
+  assert.equal(old.claude.pct, 71);
+  assert.equal(old.claude.at, Date.parse("2026-11-09T08:00:00Z"), "the last good reading keeps ITS age, not the file's");
+});
+
+test("parseLimitFile: garbage in, nulls out; pct is clamped and 0 is real data", () => {
+  for (const bad of [null, undefined, "x", 5, [], {}]) {
+    const r = parseLimitFile(bad);
+    assert.equal(r.claude, null);
+    assert.equal(r.codex, null);
+  }
+  assert.equal(parseLimitFile({ at: "2026-11-09T10:00:00Z", codex: { pct: 140 } }).codex.pct, 100);
+  assert.equal(parseLimitFile({ at: "2026-11-09T10:00:00Z", codex: { pct: 0 } }).codex.pct, 0);
+  assert.equal(parseLimitFile({ at: "2026-11-09T10:00:00Z", codex: { pct: null } }).codex, null);
+  assert.equal(LIMIT_FRESH_MS, 40 * 60_000);
+});
+
+test("parseDesktopHistory: newest sample wins, junk is skipped", () => {
+  const r = parseDesktopHistory({ version: 2, samples: [{ t: 2000, u: { fh: 5, sd: 30 } }, { t: 3000, u: { fh: 12, sd: 33 } }, { t: 4000, u: {} }, { t: "x", u: { fh: 99 } }] });
+  assert.deepEqual(r, { pct: 12, week: 33, resetsAt: null, at: 3000 });
+  assert.equal(parseDesktopHistory(null), null);
+  assert.equal(parseDesktopHistory({ samples: [] }), null);
 });
