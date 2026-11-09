@@ -288,3 +288,17 @@ export function parseLimitFile(j) {
   const codex = limitSide(j.codex, j.lastGood?.codex, fileAt, () => ({}));
   return { claude, codex, fileAt };
 }
+
+// Claude Desktop samples the plan's 5-hour (fh) and 7-day (sd) percentages into
+// plan-usage-history.json about every 15 minutes while it can reach its usage endpoint.
+// Only the newest sample counts; it carries its own timestamp so a stalled sampler reads as stale.
+export function parseDesktopHistory(j) {
+  const s = Array.isArray(j?.samples) ? j.samples : [];
+  let best = null;
+  for (const x of s) {
+    const at = Number(x?.t);
+    if (!Number.isFinite(at) || pctNum(x?.u?.fh) == null) continue;
+    if (!best || at > best.at) best = { pct: pctNum(x.u.fh), week: pctNum(x.u.sd), resetsAt: null, at };
+  }
+  return best;
+}

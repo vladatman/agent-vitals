@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { windowStartMs, rateFor, estimateCost, parseRequests, mergeById, aggregate, familyOf, aggregateByModel, budgetPct, gaugeSource, hasSubscriptionData, parseLimitFile, LIMIT_FRESH_MS, USAGE_FRESH_MS, newDayCounts, foldDayChunk, dayCountsTotals } from "../src/usage.js";
+import { windowStartMs, rateFor, estimateCost, parseRequests, mergeById, aggregate, familyOf, aggregateByModel, budgetPct, gaugeSource, hasSubscriptionData, parseLimitFile, parseDesktopHistory, LIMIT_FRESH_MS, USAGE_FRESH_MS, newDayCounts, foldDayChunk, dayCountsTotals } from "../src/usage.js";
 
 test("windowStartMs 7day is exactly now - 7 days", () => {
   const now = 1_800_000_000_000;
@@ -489,4 +489,11 @@ test("parseLimitFile: garbage in, nulls out; pct is clamped and 0 is real data",
   assert.equal(parseLimitFile({ at: "2026-11-09T10:00:00Z", codex: { pct: 0 } }).codex.pct, 0);
   assert.equal(parseLimitFile({ at: "2026-11-09T10:00:00Z", codex: { pct: null } }).codex, null);
   assert.equal(LIMIT_FRESH_MS, 40 * 60_000);
+});
+
+test("parseDesktopHistory: newest sample wins, junk is skipped", () => {
+  const r = parseDesktopHistory({ version: 2, samples: [{ t: 2000, u: { fh: 5, sd: 30 } }, { t: 3000, u: { fh: 12, sd: 33 } }, { t: 4000, u: {} }, { t: "x", u: { fh: 99 } }] });
+  assert.deepEqual(r, { pct: 12, week: 33, resetsAt: null, at: 3000 });
+  assert.equal(parseDesktopHistory(null), null);
+  assert.equal(parseDesktopHistory({ samples: [] }), null);
 });

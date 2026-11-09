@@ -9,7 +9,7 @@ import path from "node:path";
 import { spawn, execFile } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { escapeAppleScript, parseHotkey, hotkeyClause, classifyCustomCommand, parseKeychainToken, parsePsTree, hostAppForPid, focusStrategyForBundle, terminalFocusScript, parseProcStarts } from "./osa.js";
-import { parseLimitFile, LIMIT_FRESH_MS, windowStartMs, parseRequests, mergeById, aggregate, aggregateByModel, budgetPct, localDay, newDayCounts, foldDayChunk, dayCountsTotals } from "./usage.js";
+import { parseLimitFile, parseDesktopHistory, LIMIT_FRESH_MS, windowStartMs, parseRequests, mergeById, aggregate, aggregateByModel, budgetPct, localDay, newDayCounts, foldDayChunk, dayCountsTotals } from "./usage.js";
 import { resolveStatusKey, statusEntry, autoSlot, sessionState, blockedSessions, sessionSig, transcriptPathFor, pidLooksRecycled } from "./status.js";
 import { randomBytes } from "node:crypto";
 import {
@@ -131,14 +131,23 @@ try {
 // that answers 429 to everyone; Codex has no other source. Override with AGENT_VITALS_LIMIT_FILE
 // (empty string turns the reader off).
 const LIMIT_FILE = process.env.AGENT_VITALS_LIMIT_FILE ?? (IS_MAC ? "" : "E:\\local-compute\\limit.json");
+// Claude Desktop's own sampler file; the fallback for Claude percentages when the gate has none or an older one.
+const DESKTOP_HISTORY_FILE = process.env.AGENT_VITALS_DESKTOP_USAGE_FILE ??
+  (IS_MAC ? path.join(os.homedir(), "Library", "Application Support", "Claude", "plan-usage-history.json")
+    : path.join(process.env.APPDATA ?? "", "Claude", "plan-usage-history.json"));
 const limitClaudeFresh = () => !!state.limit?.claude && Date.now() - state.limit.claude.at < 15 * 60_000;
 async function pollLimitFile() {
   if (!LIMIT_FILE) return;
   let parsed;
   try { parsed = parseLimitFile(JSON.parse(await fsp.readFile(LIMIT_FILE, "utf8"))); } catch { return; }
+  let c = parsed.claude;
+  if (DESKTOP_HISTORY_FILE) {
+    let d = null;
+    try { d = parseDesktopHistory(JSON.parse(await fsp.readFile(DESKTOP_HISTORY_FILE, "utf8"))); } catch {}
+    if (d && (!c || d.at > c.at)) c = { ...d, week: d.week ?? c?.week ?? null, resetsAt: c?.resetsAt ?? null };
+  }
   const before = JSON.stringify(state.limit);
-  state.limit = { claude: parsed.claude, codex: parsed.codex };
-  const c = parsed.claude;
+  state.limit = { claude: c, codex: parsed.codex };
   // A Claude reading newer than our own (or when our own endpoint is failing) feeds the Session and
   // Weekly gauges, so they come back even while this plugin's own call keeps getting 429.
   if (c && c.at > state.usageAt) {
