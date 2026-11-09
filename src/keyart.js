@@ -25,6 +25,7 @@
 //
 //  3. ONE SKELETON on every key, both classes: header 0-34, value, sub at y=127.
 import { describeRequest, alwaysRule } from "./approve.js";
+import { fireBed, embers, barFire, sessionFlames, FIRE } from "./fx.js";
 
 const C = {
   bg: "#16151c",
@@ -229,19 +230,28 @@ function usageMeterKey(head, big, sub, isCost) {
     ${foot(sub)}`);
 }
 
-function gaugeKey(label, pct, sub, pulsePhase = null) {
+// `fx` ({ frame }) switches on the heat animation: flames lick the end of the bar from
+// 50%, and from 90% the whole key burns with sparks rising. Without it the original
+// static look (and the 3-frame red pulse) is unchanged.
+function gaugeKey(label, pct, sub, pulsePhase = null, fx = null) {
   const has = typeof pct === "number" && isFinite(pct);
   const p = has ? Math.max(0, Math.min(100, pct)) : 0;
   // The percentage crosses thresholds, so it IS state and keeps its colour.
   const col = has ? pctColor(p) : C.dim;
-  const pulse = pulsePhase == null ? "" :
+  const pal = p >= 85 ? FIRE.bad : p >= 60 ? FIRE.warn : FIRE.ok;
+  const burning = fx && has && p >= 90;
+  const pulse = fx || pulsePhase == null ? "" :
     `<rect x="4" y="4" width="136" height="136" rx="16" fill="none" stroke="${C.bad}" stroke-width="6" opacity="${[0.2, 0.55, 0.95][pulsePhase % 3]}"/>`;
+  const fillW = Math.max(7, (120 * p) / 100);
   return svgWrap(`
     ${pulse}
+    ${burning ? fireBed(fx.frame, 0.4 + 0.6 * ((p - 90) / 10), FIRE.bad, { maxH: 64, op: 0.5 }) : ""}
     ${header(label)}
     ${line(72, 82, 128, has ? 44 : 32, 700, col, has ? Math.round(p) + "%" : "--")}
     <rect x="12" y="94" width="120" height="10" rx="5" fill="${C.track}"/>
-    ${has ? `<rect x="12" y="94" width="${Math.max(7, (120 * p) / 100).toFixed(1)}" height="10" rx="5" fill="${col}"/>` : ""}
+    ${has ? `<rect x="12" y="94" width="${fillW.toFixed(1)}" height="10" rx="5" fill="${col}"/>` : ""}
+    ${fx && has ? barFire(fx.frame, p, fillW, pal) : ""}
+    ${burning ? embers(fx.frame, 0.8, C.warn, { yBase: 100, rise: 70, count: 8 }) : ""}
     ${foot(sub)}`);
 }
 
@@ -260,13 +270,16 @@ function linesKey(title, rows) {
   return svgWrap(`${header(title)}${rowSvg}`);
 }
 
-function bigCountKey(title, count, sub, subColor, animPhase = null, tint = null, strong = false) {
+function bigCountKey(title, count, sub, subColor, animPhase = null, tint = null, strong = false, fx = null) {
   // animPhase non-null → cycling activity dots beside the count (frame-pushed).
-  const dots = animPhase == null ? "" : [0, 1, 2]
+  // fx ({ frame, states }) → one flame per session along the bottom instead.
+  const dots = fx || animPhase == null ? "" : [0, 1, 2]
     .map((i) => `<circle cx="128" cy="${58 + i * 15}" r="${i === animPhase ? 4.5 : 3}" fill="${i === animPhase ? (tint ?? C.info) : C.track}"/>`)
     .join("");
+  const flames = fx ? sessionFlames(fx.frame, fx.states ?? []) : "";
   return svgWrap(`
     ${tintFrame(tint, strong)}
+    ${flames}
     ${header(title)}
     ${dots}
     ${line(72, 97, 118, 60, 700, count > 0 ? C.text : C.dim, count)}
@@ -285,13 +298,31 @@ const STATUS_LOOK = {
   // couldn't stat. Saying "no status" beats inventing "Idle".
   unknown: { label: "no status", col: C.dim },
 };
-function statusKey(name, st, count, detail = "", tag = "", phase = null) {
+// The fire behind a status key. `fx` is { frame, heat }: heat (0..1) grows with how
+// long the session has waited on you, so a fresh request is a candle and a stale one
+// is a bonfire. Working burns blue and low, finished green and low; idle burns nothing.
+const STATUS_FIRE = {
+  "needs-approval": { pal: FIRE.warn, floor: 0.35 },
+  "input-needed": { pal: FIRE.ask, floor: 0.35 },
+  working: { pal: FIRE.info, floor: 0.3, cap: 0.45 },
+  finished: { pal: FIRE.ok, floor: 0.25, cap: 0.3 },
+};
+function statusFire(st, fx) {
+  const sf = STATUS_FIRE[st];
+  if (!fx || !sf) return "";
+  const heat = Math.min(sf.cap ?? 1, Math.max(sf.floor, fx.heat ?? sf.floor));
+  const blocked = !sf.cap;
+  return fireBed(fx.frame, heat, sf.pal, { maxH: blocked ? 82 : 52, op: blocked ? 0.62 : 0.5 }) +
+    (blocked ? embers(fx.frame, heat, sf.pal[2], { yBase: 130, rise: 95 }) : "");
+}
+function statusKey(name, st, count, detail = "", tag = "", phase = null, fx = null) {
   const look = STATUS_LOOK[st] ?? STATUS_LOOK.none;
   const shown = String(name || "CLAUDE").slice(0, 11);
   // Count badge wins the corner; otherwise the "cli"/"code" tag, which is the only
   // way to tell two sessions in the same project apart.
   return svgWrap(`
-    ${tintFrame(look.col, !!look.strong, phase)}
+    ${tintFrame(look.col, !!look.strong, fx ? null : phase)}
+    ${statusFire(st, fx)}
     ${count > 1 ? badge(count, look.col) : corner(tag)}
     ${line(72, 78, 128, 25, 700, st === "none" ? C.dim : C.text, shown)}
     ${line(72, 104, 130, 17, 700, look.col, look.label)}
@@ -410,8 +441,14 @@ function approveKey(kind, req, o = {}) {
     const [top, step] = [[92, 0], [78, 26], [68, 22], [62, 18]][n - 1] ?? [92, 0];
     const body = bodyLines.slice(0, n).map((l, i) =>
       line(72, top + i * step, RULE_W, l.max ?? 22, 700, l.col ?? C.text, l.t)).join("");
+    // fx: a live request makes sparks rise in the key's own decision colour — more of
+    // them the deeper the queue (o.depth). Greyed-out and idle states stay still.
+    const spark = o.fx && mult === 1
+      ? embers(o.fx.frame, Math.min(1, 0.45 + 0.2 * (o.depth ?? 1)), col, { yBase: 132, rise: 80, count: 8 })
+      : "";
     return svgWrap(`
-      ${tintFrame(col, mult === 1, o.phase ?? null)}
+      ${tintFrame(col, mult === 1, o.fx ? null : (o.phase ?? null))}
+      ${spark}
       ${band[look.weight](col, mult)}
       ${actionHead(look.glyphName, wordOverride ?? look.word, onBand)}
       ${cornerSvg}
