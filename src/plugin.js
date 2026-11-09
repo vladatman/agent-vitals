@@ -136,8 +136,25 @@ const DESKTOP_HISTORY_FILE = process.env.AGENT_VITALS_DESKTOP_USAGE_FILE ??
   (IS_MAC ? path.join(os.homedir(), "Library", "Application Support", "Claude", "plan-usage-history.json")
     : path.join(process.env.APPDATA ?? "", "Claude", "plan-usage-history.json"));
 const limitClaudeFresh = () => !!state.limit?.claude && Date.now() - state.limit.claude.at < 15 * 60_000;
+// Mirror of claude.ai's own usage API ({ at, raw }), written by whatever holds a logged-in browser session.
+// The web API answers with the same JSON as the OAuth endpoint, which currently answers 429.
+const WEB_USAGE_FILE = process.env.AGENT_VITALS_WEB_USAGE_FILE ?? (IS_MAC ? "" : "E:\\local-compute\\claude-web-usage.json");
+async function pollWebUsage() {
+  if (!WEB_USAGE_FILE) return false;
+  let m;
+  try { m = JSON.parse(await fsp.readFile(WEB_USAGE_FILE, "utf8")); } catch { return false; }
+  const at = Number(m?.at);
+  if (!Number.isFinite(at) || !m.raw || at <= state.usageAt) return false;
+  state.usage = usageFromJson(m.raw);
+  state.usageErr = null;
+  state.usageAt = at;
+  const fp5 = state.usage.fiveHour?.pct;
+  if (typeof fp5 === "number") state.pctHistory = [...state.pctHistory.filter((h) => at - h.t < 3.6e6 && h.t < at), { t: at, pct: fp5 }];
+  return true;
+}
 async function pollLimitFile() {
-  if (!LIMIT_FILE) return;
+  const webNew = await pollWebUsage();
+  if (!LIMIT_FILE) { if (webNew) renderAll(["usage-session", "usage-weekly", "usage-model", "burn-rate"]); return; }
   let parsed;
   try { parsed = parseLimitFile(JSON.parse(await fsp.readFile(LIMIT_FILE, "utf8"))); } catch { return; }
   let c = parsed.claude;
@@ -156,11 +173,40 @@ async function pollLimitFile() {
     state.usageErr = null;
     state.usageAt = c.at;
   }
-  if (JSON.stringify(state.limit) !== before || c) renderAll(["usage-session", "usage-weekly", "usage-model", "usage-codex", "burn-rate"]);
+  if (webNew || JSON.stringify(state.limit) !== before || c) renderAll(["usage-session", "usage-weekly", "usage-model", "usage-codex", "burn-rate"]);
+}
+
+// Usage object from the /usage JSON (same shape from the OAuth endpoint and from claude.ai's own web API).
+function usageFromJson(j) {
+    const limits = Array.isArray(j.limits) ? j.limits : [];
+    const fromLimit = (kind) => {
+      const l = limits.find((x) => x.kind === kind);
+      return l ? { pct: l.percent, resetsAt: l.resets_at } : null;
+    };
+    const scoped = limits.find((x) => x.kind === "weekly_scoped");
+    // Every per-model bucket the account exposes, for the selectable model gauge
+    const models = [];
+    for (const l of limits) {
+      if (l.kind !== "weekly_scoped") continue;
+      const name = l.scope?.model?.display_name;
+      if (name && typeof l.percent === "number") models.push({ name, pct: l.percent, resetsAt: l.resets_at ?? null });
+    }
+    for (const [key, name] of [["seven_day_opus", "Opus"], ["seven_day_sonnet", "Sonnet"]]) {
+      const b = pickBucket(j[key]);
+      if (b?.pct != null && !models.some((m) => m.name === name)) models.push({ name, pct: b.pct, resetsAt: b.resetsAt });
+    }
+    return {
+      fiveHour: pickBucket(j.five_hour) ?? fromLimit("session"),
+      weekly: pickBucket(j.seven_day) ?? fromLimit("weekly_all"),
+      weeklyOpus: pickBucket(j.seven_day_opus),
+      scopedPct: scoped?.percent ?? null,
+      scopedName: scoped?.scope?.model?.display_name ?? null,
+      models,
+    };
 }
 
 async function pollUsage() {
-  if (limitClaudeFresh()) return;   // the gate already has a fresh reading: do not add to the 429s
+  if (limitClaudeFresh() || Date.now() - state.usageAt < 10 * 60_000) return;   // the gate already has a fresh reading: do not add to the 429s
   lastUsageAttempt = Date.now();
   try {
     const token = await platform.readToken();
@@ -180,31 +226,7 @@ async function pollUsage() {
       state.loggedRaw = true;
       log("usage raw shape:", JSON.stringify(j).slice(0, 1200));
     }
-    const limits = Array.isArray(j.limits) ? j.limits : [];
-    const fromLimit = (kind) => {
-      const l = limits.find((x) => x.kind === kind);
-      return l ? { pct: l.percent, resetsAt: l.resets_at } : null;
-    };
-    const scoped = limits.find((x) => x.kind === "weekly_scoped");
-    // Every per-model bucket the account exposes, for the selectable model gauge
-    const models = [];
-    for (const l of limits) {
-      if (l.kind !== "weekly_scoped") continue;
-      const name = l.scope?.model?.display_name;
-      if (name && typeof l.percent === "number") models.push({ name, pct: l.percent, resetsAt: l.resets_at ?? null });
-    }
-    for (const [key, name] of [["seven_day_opus", "Opus"], ["seven_day_sonnet", "Sonnet"]]) {
-      const b = pickBucket(j[key]);
-      if (b?.pct != null && !models.some((m) => m.name === name)) models.push({ name, pct: b.pct, resetsAt: b.resetsAt });
-    }
-    state.usage = {
-      fiveHour: pickBucket(j.five_hour) ?? fromLimit("session"),
-      weekly: pickBucket(j.seven_day) ?? fromLimit("weekly_all"),
-      weeklyOpus: pickBucket(j.seven_day_opus),
-      scopedPct: scoped?.percent ?? null,
-      scopedName: scoped?.scope?.model?.display_name ?? null,
-      models,
-    };
+    state.usage = usageFromJson(j);
     state.usageErr = null;
     state.usageAt = Date.now();
     const fp5 = state.usage.fiveHour?.pct;
