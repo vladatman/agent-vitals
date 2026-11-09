@@ -206,3 +206,19 @@ test("EADDRINUSE rejects after exhausting retries", { timeout: 5000 }, async () 
   );
   await first.h.close();
 });
+
+test("usage push route: own secret, 204 on accepted, 422 on rejected, wrong token is a bad-path hit", { timeout: 5000 }, async () => {
+  const USAGE = "u".repeat(32);
+  const got = [];
+  const { h, seen, url } = await boot({ usageSecret: USAGE, onUsage: (p) => { got.push(p); return !!p.raw; } });
+  const ok = await post(url(`/usage/${USAGE}`), { raw: { five_hour: { utilization: 5 } } });
+  assert.equal(ok.status, 204);
+  assert.equal(got.length, 1);
+  assert.equal((await post(url(`/usage/${USAGE}`), { nope: 1 })).status, 422);
+  assert.equal((await fetch(url(`/usage/${USAGE}`))).status, 405);
+  const before = h.stats.badPathHits.length;
+  assert.equal((await post(url(`/usage/${"x".repeat(32)}`), { raw: {} })).status, 404);
+  assert.equal(h.stats.badPathHits.length, before + 1);
+  assert.equal(seen.length, 0);   // never reaches the approve handler
+  await h.close();
+});

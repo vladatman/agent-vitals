@@ -139,17 +139,36 @@ const limitClaudeFresh = () => !!state.limit?.claude && Date.now() - state.limit
 // Mirror of claude.ai's own usage API ({ at, raw }), written by whatever holds a logged-in browser session.
 // The web API answers with the same JSON as the OAuth endpoint, which currently answers 429.
 const WEB_USAGE_FILE = process.env.AGENT_VITALS_WEB_USAGE_FILE ?? (IS_MAC ? "" : "E:\\local-compute\\claude-web-usage.json");
-async function pollWebUsage() {
-  if (!WEB_USAGE_FILE) return false;
-  let m;
-  try { m = JSON.parse(await fsp.readFile(WEB_USAGE_FILE, "utf8")); } catch { return false; }
-  const at = Number(m?.at);
-  if (!Number.isFinite(at) || !m.raw || at <= state.usageAt) return false;
-  state.usage = usageFromJson(m.raw);
+function applyWebUsage(raw, at) {
+  if (!Number.isFinite(at) || !raw || typeof raw !== "object" || at <= state.usageAt) return false;
+  if (!raw.five_hour && !Array.isArray(raw.limits)) return false;
+  state.usage = usageFromJson(raw);
   state.usageErr = null;
   state.usageAt = at;
   const fp5 = state.usage.fiveHour?.pct;
   if (typeof fp5 === "number") state.pctHistory = [...state.pctHistory.filter((h) => at - h.t < 3.6e6 && h.t < at), { t: at, pct: fp5 }];
+  return true;
+}
+async function pollWebUsage() {
+  if (!WEB_USAGE_FILE) return false;
+  let m;
+  try { m = JSON.parse(await fsp.readFile(WEB_USAGE_FILE, "utf8")); } catch { return false; }
+  return applyWebUsage(m?.raw, Number(m?.at));
+}
+// A logged-in browser (userscript) POSTs { raw } to the hook server's /usage/<token>. The token lives outside
+// PLUGIN_DIR (deploys wipe it) and is separate from the approve secret.
+const USAGE_TOKEN_FILE = path.join(os.homedir(), ".agent-vitals", "usage-push-token");
+function usagePushToken() {
+  try { const t = fs.readFileSync(USAGE_TOKEN_FILE, "utf8").trim(); if (t.length >= 32) return t; } catch {}
+  const t = randomBytes(24).toString("hex");
+  try { fs.mkdirSync(path.dirname(USAGE_TOKEN_FILE), { recursive: true }); fs.writeFileSync(USAGE_TOKEN_FILE, t + "\n", { mode: 0o600 }); } catch {}
+  return t;
+}
+function onUsagePush(payload) {
+  const at = Date.now();
+  if (!applyWebUsage(payload?.raw, at)) return false;
+  if (WEB_USAGE_FILE) { try { fs.writeFileSync(WEB_USAGE_FILE, JSON.stringify({ at, raw: payload.raw })); } catch (e) { log("usage mirror write failed:", String(e.message ?? e)); } }
+  renderAll(["usage-session", "usage-weekly", "usage-model", "burn-rate"]);
   return true;
 }
 async function pollLimitFile() {
@@ -560,7 +579,7 @@ async function ensureHookServerOnce() {
   const previous = hookServer;
   try {
     const next = await startHookServer({
-      port, secret, onRequest: onHookRequest, onDrop: onHookDrop, log,
+      port, secret, onRequest: onHookRequest, onDrop: onHookDrop, usageSecret: usagePushToken(), onUsage: onUsagePush, log,
     });
     // Requests held by the old server belong to a socket we are about to drop.
     if (previous && state.approveQueue.length) {
