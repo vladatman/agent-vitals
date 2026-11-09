@@ -137,7 +137,7 @@ async function pollUsage() {
         "Content-Type": "application/json",
       },
     });
-    if (res.status === 429) { usageDelay = Math.min(usageDelay * 2, 900_000); throw new Error(`usage endpoint HTTP 429 (backing off to ${usageDelay / 1000}s)`); }
+    if (res.status === 429) { usageDelay = Math.min(usageDelay * 2, 900_000); setTimeout(() => pollUsageMeter(), 0); throw new Error(`usage endpoint HTTP 429 (backing off to ${usageDelay / 1000}s)`); }
     if (!res.ok) throw new Error(`usage endpoint HTTP ${res.status}`);
     usageDelay = USAGE_DELAY_BASE;
     const j = await res.json();

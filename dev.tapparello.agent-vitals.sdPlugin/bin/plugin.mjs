@@ -4047,8 +4047,7 @@ function gaugeSource({ usage, usageErr, usageAt, now }, hasLocal = false) {
   if (usage == null && !usageErr) return "pending";
   const fresh = hasSubscriptionData(usage) && now - (usageAt ?? 0) < USAGE_FRESH_MS;
   if (fresh) return "subscription";
-  if (usageErr && String(usageErr).includes("429")) return "throttled";
-  if (usageErr && String(usageErr).includes("no OAuth token")) return "local";
+  if (usageErr && (String(usageErr).includes("429") || String(usageErr).includes("no OAuth token"))) return "local";
   if (usageErr) return "error";
   return hasLocal ? "local" : "pending";
 }
@@ -5118,7 +5117,7 @@ function viewFor(kind, env) {
       const sub = blocked > 0 ? `${blocked} needs you` : busy > 0 ? `${busy} working` : n > 0 ? "all idle" : "none running";
       const subCol = blocked > 0 ? C.warn : busy > 0 ? C.info : C.dim;
       return img(bigCountKey(
-        "CLAUDE CODE",
+        "SESSIONS",
         n,
         sub,
         subCol,
@@ -5179,7 +5178,7 @@ function viewFor(kind, env) {
       const blocked = blockedSessions(state2.sessions, now, state2.activity, state2.pending);
       if (!blocked.length) {
         const n = state2.sessions.length;
-        return img(statusKey("WAITING", "quiet", 1, n ? `${n} session${n > 1 ? "s" : ""} ok` : "no sessions"));
+        return img(statusKey("NEEDS YOU", "quiet", 1, n ? `${n} session${n > 1 ? "s" : ""} ok` : "no sessions"));
       }
       const i = cycleIdx >= 0 ? cycleIdx % blocked.length : 0;
       const b = blocked[i];
@@ -5342,6 +5341,7 @@ async function pollUsage() {
     });
     if (res.status === 429) {
       usageDelay = Math.min(usageDelay * 2, 9e5);
+      setTimeout(() => pollUsageMeter(), 0);
       throw new Error(`usage endpoint HTTP 429 (backing off to ${usageDelay / 1e3}s)`);
     }
     if (!res.ok) throw new Error(`usage endpoint HTTP ${res.status}`);

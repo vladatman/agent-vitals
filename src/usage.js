@@ -247,8 +247,10 @@ export function budgetPct(spend, budget) {
 // leaves a frozen snapshot that would otherwise read as live data.
 //   "pending"      nothing known yet (cold start) -> keep today's "--"
 //   "subscription" fresh account-level limit data
-//   "throttled"    429 -> today's message; the API does apply, just rate-limited
-//   "local"        no consumer token, or stale data and local numbers exist
+//   "throttled"    (no longer returned: a 429 now falls back to "local", because on a
+//                  shared account the endpoint can answer 429 for hours and the keys
+//                  sat on "throttled" with no number and no fire)
+//   "local"        no consumer token, a 429 with no fresh reading, or stale data and local numbers exist
 //   "error"        any other failure -> today's "sign in?", never silently local
 export const USAGE_FRESH_MS = 30 * 60_000;
 export function hasSubscriptionData(usage) {
@@ -260,8 +262,9 @@ export function gaugeSource({ usage, usageErr, usageAt, now }, hasLocal = false)
   if (usage == null && !usageErr) return "pending";
   const fresh = hasSubscriptionData(usage) && now - (usageAt ?? 0) < USAGE_FRESH_MS;
   if (fresh) return "subscription";
-  if (usageErr && String(usageErr).includes("429")) return "throttled";
-  if (usageErr && String(usageErr).includes("no OAuth token")) return "local";
+  // 429: the last good reading above already held for USAGE_FRESH_MS; past that, local
+  // transcript spend is the honest number, not a frozen "throttled".
+  if (usageErr && (String(usageErr).includes("429") || String(usageErr).includes("no OAuth token"))) return "local";
   if (usageErr) return "error";
   return hasLocal ? "local" : "pending";
 }
