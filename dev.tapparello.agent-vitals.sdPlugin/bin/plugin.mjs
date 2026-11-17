@@ -6260,7 +6260,9 @@ ${enter ? "Start-Sleep -Milliseconds 200; P 0x0D; R 0x0D;" : ""}`;
   // Bring the session's terminal window to front by title substring (verbatim
   // EnumWindows/SetForegroundWindow). execFile gives a real exit code.
   focusWindow(s) {
-    if (s?.entrypoint === "claude-desktop") return focusDesktop();
+    if (s?.entrypoint === "claude-desktop") {
+      return /^local_[A-Za-z0-9-]+$/.test(s.hostSessionId ?? "") ? spawnDetached("cmd.exe", ["/c", "start", "", `claude://code/continue?session=${s.hostSessionId}`]) : focusDesktop();
+    }
     const target = focusTarget(s);
     if (!target) return Promise.reject(new Error("no focus target"));
     const ps = `

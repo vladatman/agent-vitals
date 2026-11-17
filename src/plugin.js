@@ -1063,7 +1063,13 @@ ${enter ? "Start-Sleep -Milliseconds 200; P 0x0D; R 0x0D;" : ""}`;
   focusWindow(s) {
     // A Desktop (Code tab) session has no window of its own: the Claude app is where
     // it waits, so focus the app's main window instead of alerting on "not found".
-    if (s?.entrypoint === "claude-desktop") return focusDesktop();
+    // Claude Desktop's own deep link opens THAT session (with its pending prompt) and
+    // shows the window; same link the app's "Continue session" entry point uses.
+    if (s?.entrypoint === "claude-desktop") {
+      return /^local_[A-Za-z0-9-]+$/.test(s.hostSessionId ?? "")
+        ? spawnDetached("cmd.exe", ["/c", "start", "", `claude://code/continue?session=${s.hostSessionId}`])
+        : focusDesktop();
+    }
     const target = focusTarget(s);
     if (!target) return Promise.reject(new Error("no focus target"));
     const ps = `
