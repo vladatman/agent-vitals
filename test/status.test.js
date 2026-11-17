@@ -431,3 +431,12 @@ test("threadTitle: rename_thread wins, else the first non-boilerplate note sente
   assert.equal(threadTitle("nothing here"), null);
   assert.ok(GENERIC_TITLE.test("Local session (from a project)"));
 });
+
+test("sessions waiting over 2h drop off the Status and Waiting keys", async () => {
+  const { resolveStatusKey, blockedSessions } = await import("../src/status.js");
+  const now = 10 * 3_600_000;
+  const old = { pid: 1, sessionId: "a", cwd: "/x/old", status: "waiting", statusUpdatedAt: now - 3 * 3_600_000, updatedAt: now - 3 * 3_600_000 };
+  const fresh = { pid: 2, sessionId: "b", cwd: "/x/new", status: "waiting", statusUpdatedAt: now - 60_000, updatedAt: now - 60_000 };
+  assert.deepEqual(resolveStatusKey([old, fresh], "", 0, now).list.map((e) => e.name), ["new"]);
+  assert.deepEqual(blockedSessions([old, fresh], now).map((s) => s.pid), [2]);
+});

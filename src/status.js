@@ -137,8 +137,17 @@ const rank = (s, now, activity, pending) => URGENCY[sessionState(s, now, actOf(s
 
 // Sessions blocked on the human, most urgent first. Returns the *full* poller
 // records (callers pass them to platform.focusWindow, which needs `pid`).
+// A session blocked on you for over 2h is a forgotten thread, not a live ask: keep it
+// off the keys so they show what needs you now (it still waits in Claude Desktop).
+export const STALE_WAIT_MS = 2 * 3_600_000;
+export function staleWait(s, now = Date.now(), pending = null) {
+  const since = s?.status === "waiting" && s.statusUpdatedAt ? s.statusUpdatedAt : (pendOf(s, pending)?.since ?? null);
+  return since != null && now - since > STALE_WAIT_MS;
+}
+
 export function blockedSessions(sessions, now = Date.now(), activity = null, pending = null) {
   return (sessions ?? [])
+    .filter((s) => !staleWait(s, now, pending))
     .filter((s) => rank(s, now, activity, pending) <= URGENCY["input-needed"])
     .sort((a, b) => rank(a, now, activity, pending) - rank(b, now, activity, pending) || (b.updatedAt ?? 0) - (a.updatedAt ?? 0) || (a.pid ?? 0) - (b.pid ?? 0));
 }
@@ -215,7 +224,7 @@ export function resolveStatusKey(sessions, project, autoIdx = 0, now = Date.now(
   const explicit = !!(project && String(project).trim());
   const want = explicit ? String(project).trim().toLowerCase() : null;
   const list = (sessions ?? [])
-    .filter((s) => (explicit ? sessionProject(s) === want : true))
+    .filter((s) => (explicit ? sessionProject(s) === want : true) && !staleWait(s, now, pending))
     .sort((a, b) => byDisplayOrder(a, b, now, activity, pending))
     .map((s) => {
       // A VS Code session has no waitingFor or statusUpdatedAt of its own, so the held

@@ -4134,8 +4134,13 @@ var actOf = (s, activity) => activity && s?.sessionId ? activity.get(s.sessionId
 var pendOf = (s, pending) => pending && s?.sessionId ? pending.get(s.sessionId) ?? null : null;
 var pendKind = (s, pending) => pendOf(s, pending)?.kind ?? null;
 var rank = (s, now, activity, pending) => URGENCY[sessionState(s, now, actOf(s, activity), pendKind(s, pending))] ?? 5;
+var STALE_WAIT_MS = 2 * 36e5;
+function staleWait(s, now = Date.now(), pending = null) {
+  const since = s?.status === "waiting" && s.statusUpdatedAt ? s.statusUpdatedAt : pendOf(s, pending)?.since ?? null;
+  return since != null && now - since > STALE_WAIT_MS;
+}
 function blockedSessions(sessions, now = Date.now(), activity = null, pending = null) {
-  return (sessions ?? []).filter((s) => rank(s, now, activity, pending) <= URGENCY["input-needed"]).sort((a, b) => rank(a, now, activity, pending) - rank(b, now, activity, pending) || (b.updatedAt ?? 0) - (a.updatedAt ?? 0) || (a.pid ?? 0) - (b.pid ?? 0));
+  return (sessions ?? []).filter((s) => !staleWait(s, now, pending)).filter((s) => rank(s, now, activity, pending) <= URGENCY["input-needed"]).sort((a, b) => rank(a, now, activity, pending) - rank(b, now, activity, pending) || (b.updatedAt ?? 0) - (a.updatedAt ?? 0) || (a.pid ?? 0) - (b.pid ?? 0));
 }
 function fmtShort(ms) {
   if (ms == null || !isFinite(ms)) return "";
@@ -4180,7 +4185,7 @@ function byDisplayOrder(a, b, now, activity, pending) {
 function resolveStatusKey(sessions, project, autoIdx = 0, now = Date.now(), activity = null, pending = null) {
   const explicit = !!(project && String(project).trim());
   const want = explicit ? String(project).trim().toLowerCase() : null;
-  const list = (sessions ?? []).filter((s) => explicit ? sessionProject(s) === want : true).sort((a, b) => byDisplayOrder(a, b, now, activity, pending)).map((s) => {
+  const list = (sessions ?? []).filter((s) => (explicit ? sessionProject(s) === want : true) && !staleWait(s, now, pending)).sort((a, b) => byDisplayOrder(a, b, now, activity, pending)).map((s) => {
     const p = pendOf(s, pending);
     return {
       name: s.title || path.basename(s.cwd ?? "") || "claude",
