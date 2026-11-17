@@ -421,3 +421,13 @@ test("sessionSig changes when a request arrives, so the key repaints", () => {
   const after = sessionSig(sessions, NOW, new Map([["v1", NOW]]), PEND());
   assert.notEqual(before, after);
 });
+
+test("threadTitle: rename_thread wins, else the first non-boilerplate note sentence", async () => {
+  const { threadTitle, GENERIC_TITLE } = await import("../src/status.js");
+  const note = JSON.stringify({ content: "<note>\n Read-only check, change nothing. Fix the \"export\" button on Safari. More.</note>" });
+  assert.equal(threadTitle(note), 'Fix the "export" button on Safari');
+  const renamed = note + "\n" + JSON.stringify({ type: "tool_use", name: "mcp__hearthbot__rename_thread", input: { title: "Fix Safari export" } });
+  assert.equal(threadTitle(renamed), "Fix Safari export");
+  assert.equal(threadTitle("nothing here"), null);
+  assert.ok(GENERIC_TITLE.test("Local session (from a project)"));
+});

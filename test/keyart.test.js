@@ -172,3 +172,11 @@ test("no report or action key overflows its box on adversarial input", () => {
   assertInsideBox(actionKey("launch", "launch", "Desktop", "claude app"), "action");
   assertInsideBox(actionKey("web", "claude.ai", LONG, LONG), "action long");
 });
+
+test("nameRows: short name stays one row, a title wraps to two readable rows", async () => {
+  const { nameRows } = await import("../src/keyart.js");
+  assert.deepEqual(nameRows("overclock"), ["overclock"]);
+  assert.deepEqual(nameRows("Обновить Stream Deck под текущую систему"), ["Обновить", "Stream Deck"]);
+  assert.deepEqual(nameRows("Fix Safari export button"), ["Fix Safari", "export button"]);
+  assert.ok(nameRows("Supercalifragilisticexpialidocious x").every((r) => r.length <= 14));
+});

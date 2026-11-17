@@ -417,7 +417,7 @@ export function viewFor(kind, env) {
       const waited = since ? fmtShort(now - since) : "";
       const why = shortWait(b.waitingFor ?? p?.reason ?? "") || "needs you";
       const fresh = !since || now - since < PULSE_MS;
-      return img(statusKey(path.basename(b.cwd ?? "") || "claude", st, blocked.length, why + (waited ? " · " + waited : ""), sessionWhere(b), fresh ? animPhase : null,
+      return img(statusKey(b.title || path.basename(b.cwd ?? "") || "claude", st, blocked.length, why + (waited ? " · " + waited : ""), sessionWhere(b), fresh ? animPhase : null,
         FX ? { frame: fresh ? frame : 0, heat: waitHeat(since, now) } : null));
     }
     case "approve-allow":

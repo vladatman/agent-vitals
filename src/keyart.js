@@ -319,16 +319,38 @@ function statusFire(st, fx) {
   return fireBed(fx.frame, heat, sf.pal, { maxH: blocked ? 66 : 48, op: blocked ? 0.5 : 0.45 }) +
     (blocked ? embers(fx.frame, heat, sf.pal[2], { yBase: 130, rise: 95 }) : "");
 }
+// 1 row when it fits the big font, else up to 2 word-wrapped rows of <=14 chars
+// (a word longer than that is cut; the rest of a long title is dropped).
+function nameRows(name) {
+  const s = String(name).trim().replace(/\s+/g, " ");
+  if (s.length <= 11) return [s];
+  const rows = [];
+  let cur = "";
+  for (const w of s.split(" ")) {
+    if (!cur) cur = w.slice(0, 14);
+    else if ((cur + " " + w).length <= 14) cur += " " + w;
+    else { rows.push(cur); cur = w.slice(0, 14); if (rows.length === 2) break; }
+  }
+  if (cur && rows.length < 2) rows.push(cur);
+  return rows.slice(0, 2);
+}
+
 function statusKey(name, st, count, detail = "", tag = "", phase = null, fx = null) {
   const look = STATUS_LOOK[st] ?? STATUS_LOOK.none;
-  const shown = String(name || "CLAUDE").slice(0, 11);
+  // A short name fills one big line; a session title ("Fix Safari export button")
+  // wraps onto two smaller ones so it stays readable instead of being cut at 11.
+  const rows = nameRows(name || "CLAUDE");
+  const nameCol = st === "none" ? C.dim : C.text;
+  const nameSvg = rows.length === 1
+    ? line(72, 78, 128, 25, 700, nameCol, rows[0])
+    : rows.map((r, i) => line(72, 58 + i * 21, 130, 19, 700, nameCol, r)).join("");
   // Count badge wins the corner; otherwise the "cli"/"code" tag, which is the only
   // way to tell two sessions in the same project apart.
   return svgWrap(`
     ${tintFrame(look.col, !!look.strong, fx ? null : phase)}
     ${statusFire(st, fx)}
     ${count > 1 ? badge(count, look.col) : corner(tag)}
-    ${line(72, 78, 128, 25, 700, st === "none" ? C.dim : C.text, shown)}
+    ${nameSvg}
     ${line(72, 104, 130, 17, 700, look.col, look.label)}
     ${detail && fx ? `<rect x="22" y="117" width="100" height="14" rx="7" fill="${C.bg}" opacity="0.55"/>` : ""}
     ${detail ? line(72, 127, 132, 13, 400, fx ? C.text : C.dim, detail) : ""}`);
@@ -494,5 +516,5 @@ function approveKey(kind, req, o = {}) {
 export {
   C, pctColor, esc, tintFrame, svgWrap, fit, fits, txt, glyph, iconSvg, listIconSvg, ruleLines,
   gaugeKey, linesKey, bigCountKey, burnKey, usageMeterKey, labelKey, actionKey,
-  STATUS_LOOK, statusKey, APPROVE_LOOK, approveKey, fmtNum,
+  STATUS_LOOK, statusKey, nameRows, APPROVE_LOOK, approveKey, fmtNum,
 };
