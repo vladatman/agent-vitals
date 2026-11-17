@@ -4069,6 +4069,16 @@ function parseLimitFile(j) {
   const codex = limitSide(j.codex, j.lastGood?.codex, fileAt, () => ({}));
   return { claude, codex, fileAt };
 }
+function parseDesktopHistory(j) {
+  const s = Array.isArray(j?.samples) ? j.samples : [];
+  let best = null;
+  for (const x of s) {
+    const at = Number(x?.t);
+    if (!Number.isFinite(at) || pctNum(x?.u?.fh) == null) continue;
+    if (!best || at > best.at) best = { pct: pctNum(x.u.fh), week: pctNum(x.u.sd), resetsAt: null, at };
+  }
+  return best;
+}
 
 // src/status.js
 import path from "node:path";
@@ -4124,8 +4134,13 @@ var actOf = (s, activity) => activity && s?.sessionId ? activity.get(s.sessionId
 var pendOf = (s, pending) => pending && s?.sessionId ? pending.get(s.sessionId) ?? null : null;
 var pendKind = (s, pending) => pendOf(s, pending)?.kind ?? null;
 var rank = (s, now, activity, pending) => URGENCY[sessionState(s, now, actOf(s, activity), pendKind(s, pending))] ?? 5;
+var STALE_WAIT_MS = 2 * 36e5;
+function staleWait(s, now = Date.now(), pending = null) {
+  const since = s?.status === "waiting" && s.statusUpdatedAt ? s.statusUpdatedAt : pendOf(s, pending)?.since ?? null;
+  return since != null && now - since > STALE_WAIT_MS;
+}
 function blockedSessions(sessions, now = Date.now(), activity = null, pending = null) {
-  return (sessions ?? []).filter((s) => rank(s, now, activity, pending) <= URGENCY["input-needed"]).sort((a, b) => rank(a, now, activity, pending) - rank(b, now, activity, pending) || (b.updatedAt ?? 0) - (a.updatedAt ?? 0) || (a.pid ?? 0) - (b.pid ?? 0));
+  return (sessions ?? []).filter((s) => !staleWait(s, now, pending)).filter((s) => rank(s, now, activity, pending) <= URGENCY["input-needed"]).sort((a, b) => rank(a, now, activity, pending) - rank(b, now, activity, pending) || (b.updatedAt ?? 0) - (a.updatedAt ?? 0) || (a.pid ?? 0) - (b.pid ?? 0));
 }
 function fmtShort(ms) {
   if (ms == null || !isFinite(ms)) return "";
@@ -4170,10 +4185,10 @@ function byDisplayOrder(a, b, now, activity, pending) {
 function resolveStatusKey(sessions, project, autoIdx = 0, now = Date.now(), activity = null, pending = null) {
   const explicit = !!(project && String(project).trim());
   const want = explicit ? String(project).trim().toLowerCase() : null;
-  const list = (sessions ?? []).filter((s) => explicit ? sessionProject(s) === want : true).sort((a, b) => byDisplayOrder(a, b, now, activity, pending)).map((s) => {
+  const list = (sessions ?? []).filter((s) => (explicit ? sessionProject(s) === want : true) && !staleWait(s, now, pending)).sort((a, b) => byDisplayOrder(a, b, now, activity, pending)).map((s) => {
     const p = pendOf(s, pending);
     return {
-      name: path.basename(s.cwd ?? "") || "claude",
+      name: s.title || path.basename(s.cwd ?? "") || "claude",
       state: sessionState(s, now, actOf(s, activity), p?.kind ?? null),
       waitingFor: s.status === "waiting" ? String(s.waitingFor ?? "permission prompt") : p?.reason ?? "",
       // null when the session reports no timestamp at all (VS Code) — otherwise
@@ -4193,6 +4208,18 @@ function resolveStatusKey(sessions, project, autoIdx = 0, now = Date.now(), acti
 function statusEntry(resolved, cycleIdx = null) {
   const i = cycleIdx != null ? cycleIdx : resolved.index;
   return resolved.list[i] ?? { name: "", state: "none", waitingFor: "", statusAge: 0, waitingSince: null, cwd: "", sessionId: null, pid: null, where: "" };
+}
+var GENERIC_TITLE = /^local session\b/i;
+function threadTitle(jsonl) {
+  const t = String(jsonl ?? "");
+  const renames = [...t.matchAll(/"name":"mcp__hearthbot__rename_thread","input":\{"title":"((?:[^"\\]|\\.)*)"/g)];
+  if (renames.length) return JSON.parse(`"${renames.at(-1)[1]}"`).trim() || null;
+  const note = t.match(/<note>((?:[^<"\\]|\\.)*)/);
+  if (!note) return null;
+  const text = JSON.parse(`"${note[1]}"`).replace(/\s+/g, " ").trim();
+  const parts = text.split(/(?<=[.!?])\s/).map((p) => p.replace(/^(goal|task|цель|задача):\s*/i, ""));
+  const pick = parts.find((p) => !/^(read-only|просьба|change nothing|no deploys)/i.test(p)) ?? parts[0];
+  return pick.replace(/[.!?]$/, "").slice(0, 40).trim() || null;
 }
 
 // src/plugin.js
@@ -4261,7 +4288,7 @@ function targetOf(req) {
 }
 function describeRequest(req) {
   return {
-    name: cut(base(req?.cwd), NAME_MAX),
+    name: cut(req?.title || base(req?.cwd), NAME_MAX),
     target: cut(targetOf(req), TARGET_MAX)
   };
 }
@@ -4380,7 +4407,7 @@ var sameSecret = (a, b) => {
   const A = Buffer.from(String(a)), B = Buffer.from(String(b));
   return A.length === B.length && timingSafeEqual(A, B);
 };
-function startHookServer({ port, secret, onRequest, onDrop, log: log2 = () => {
+function startHookServer({ port, secret, onRequest, onDrop, usageSecret = null, onUsage = null, log: log2 = () => {
 }, retries = 3, retryMs = 500 }) {
   if (!secret || String(secret).length < 32) {
     return Promise.reject(new Error("hook secret too short"));
@@ -4388,10 +4415,45 @@ function startHookServer({ port, secret, onRequest, onDrop, log: log2 = () => {
   const wantPath = `/permission/${secret}`;
   const stats = { badPathHits: [] };
   let boundPort = null;
+  const usagePath = usageSecret && String(usageSecret).length >= 32 && onUsage ? `/usage/${usageSecret}` : null;
   const server = createServer((req, res) => {
     const deny = (code) => {
       res.writeHead(code).end();
     };
+    if (usagePath && sameSecret(req.url ?? "", usagePath)) {
+      const host2 = String(req.headers.host ?? "");
+      if (host2 !== `127.0.0.1:${boundPort}` && host2 !== `localhost:${boundPort}`) return deny(403);
+      if (req.method !== "POST") return deny(405);
+      req.setEncoding("utf8");
+      let body2 = "", over2 = false;
+      req.on("data", (c) => {
+        if (over2) return;
+        body2 += c;
+        if (body2.length > 256 * 1024) {
+          over2 = true;
+          res.writeHead(413).end();
+        }
+      });
+      req.on("end", () => {
+        if (over2) return;
+        let payload;
+        try {
+          payload = JSON.parse(body2 || "{}");
+        } catch {
+          return deny(400);
+        }
+        let ok = false;
+        try {
+          ok = !!onUsage(payload);
+        } catch (e) {
+          log2("usage push threw:", String(e));
+        }
+        res.writeHead(ok ? 204 : 422).end();
+      });
+      req.on("error", () => {
+      });
+      return;
+    }
     if (!sameSecret(req.url ?? "", wantPath)) {
       const now = Date.now();
       stats.badPathHits.push(now);
@@ -4781,14 +4843,33 @@ function statusFire(st, fx) {
   const blocked = !sf.cap;
   return fireBed(fx.frame, heat, sf.pal, { maxH: blocked ? 66 : 48, op: blocked ? 0.5 : 0.45 }) + (blocked ? embers(fx.frame, heat, sf.pal[2], { yBase: 130, rise: 95 }) : "");
 }
+function nameRows(name) {
+  const s = String(name).trim().replace(/\s+/g, " ");
+  if (s.length <= 11) return [s];
+  const rows = [];
+  let cur = "";
+  for (const w of s.split(" ")) {
+    if (!cur) cur = w.slice(0, 14);
+    else if ((cur + " " + w).length <= 14) cur += " " + w;
+    else {
+      rows.push(cur);
+      cur = w.slice(0, 14);
+      if (rows.length === 2) break;
+    }
+  }
+  if (cur && rows.length < 2) rows.push(cur);
+  return rows.slice(0, 2);
+}
 function statusKey(name, st, count, detail = "", tag = "", phase = null, fx = null) {
   const look = STATUS_LOOK[st] ?? STATUS_LOOK.none;
-  const shown = String(name || "CLAUDE").slice(0, 11);
+  const rows = nameRows(name || "CLAUDE");
+  const nameCol = st === "none" ? C.dim : C.text;
+  const nameSvg = rows.length === 1 ? line(72, 78, 128, 25, 700, nameCol, rows[0]) : rows.map((r, i) => line(72, 58 + i * 21, 130, 19, 700, nameCol, r)).join("");
   return svgWrap(`
     ${tintFrame(look.col, !!look.strong, fx ? null : phase)}
     ${statusFire(st, fx)}
     ${count > 1 ? badge(count, look.col) : corner(tag)}
-    ${line(72, 78, 128, 25, 700, st === "none" ? C.dim : C.text, shown)}
+    ${nameSvg}
     ${line(72, 104, 130, 17, 700, look.col, look.label)}
     ${detail && fx ? `<rect x="22" y="117" width="100" height="14" rx="7" fill="${C.bg}" opacity="0.55"/>` : ""}
     ${detail ? line(72, 127, 132, 13, 400, fx ? C.text : C.dim, detail) : ""}`);
@@ -5036,6 +5117,15 @@ function demoState(now) {
     approveQueue: [{ id: -1, receivedAt: now - 3e3, toolName: "Bash", cwd: "/demo/overclock-lab", toolInput: { command: "npm test" }, suggestions: [] }]
   };
 }
+function staleAge(now, at) {
+  const m = Math.max(0, Math.round((now - (at ?? 0)) / 6e4));
+  return m < 90 ? `${m}m old` : m < 48 * 60 ? `${Math.round(m / 60)}h old` : `${Math.round(m / 1440)}d old`;
+}
+function staleReading(state2, now, pct, maxAgeMs) {
+  const at = state2.usageAt ?? 0;
+  if (pct == null || !at || now - at > maxAgeMs) return null;
+  return { pct, sub: staleAge(now, at) };
+}
 function viewFor(kind, env) {
   const {
     state: state2,
@@ -5057,6 +5147,10 @@ function viewFor(kind, env) {
     case "usage-session": {
       const mode = gaugeMode(state2, "usage-session", now);
       if (mode === "local") return img(localGauge("LAST 5H", state2.usageMeter?.["5h"], settings.budget, usageViewMode, animPhase2, FX));
+      if (mode !== "subscription") {
+        const st = staleReading(state2, now, state2.usage?.fiveHour?.pct, 5 * 36e5);
+        if (st) return img(gaugeKey("SESSION 5H", st.pct, st.sub));
+      }
       if (mode !== "subscription") return img(gaugeKey("SESSION 5H", null, mode === "throttled" ? "throttled" : mode === "error" ? "sign in?" : "no data"));
       const b = state2.usage?.fiveHour;
       return img(gaugeKey("SESSION 5H", b?.pct ?? null, b ? fmtReset(b.resetsAt, now) : "no data", b?.pct >= 90 ? animPhase2 : null, FX));
@@ -5064,6 +5158,10 @@ function viewFor(kind, env) {
     case "usage-weekly": {
       const mode = gaugeMode(state2, "usage-weekly", now);
       if (mode === "local") return img(localGauge("LAST 7D", state2.usageMeter?.["7day"], settings.budget, usageViewMode, animPhase2, FX));
+      if (mode !== "subscription") {
+        const st = staleReading(state2, now, state2.usage?.weekly?.pct, 7 * 864e5);
+        if (st) return img(gaugeKey("WEEKLY", st.pct, st.sub));
+      }
       if (mode !== "subscription") return img(gaugeKey("WEEKLY", null, mode === "throttled" ? "throttled" : mode === "error" ? "sign in?" : "no data"));
       const b = state2.usage?.weekly;
       const u = state2.usage;
@@ -5217,7 +5315,7 @@ function viewFor(kind, env) {
       const why = shortWait(b.waitingFor ?? p?.reason ?? "") || "needs you";
       const fresh = !since || now - since < PULSE_MS;
       return img(statusKey(
-        path2.basename(b.cwd ?? "") || "claude",
+        b.title || path2.basename(b.cwd ?? "") || "claude",
         st,
         blocked.length,
         why + (waited ? " \xB7 " + waited : ""),
@@ -5262,6 +5360,7 @@ var CLAUDE_DIR = path3.join(os.homedir(), ".claude");
 var CREDS_FILE = path3.join(CLAUDE_DIR, ".credentials.json");
 var SESSIONS_DIR = path3.join(CLAUDE_DIR, "sessions");
 var PROJECTS_DIR = path3.join(CLAUDE_DIR, "projects");
+var DESKTOP_SESSIONS_DIR = path3.join(process.env.APPDATA ?? path3.join(os.homedir(), "AppData", "Roaming"), "Claude", "claude-code-sessions");
 var USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
 var githubDir = path3.join(os.homedir(), "Documents", "GitHub");
 var DEFAULT_CODE_DIR = fs.existsSync(githubDir) ? githubDir : os.homedir();
@@ -5358,28 +5457,116 @@ try {
 } catch {
 }
 var LIMIT_FILE = process.env.AGENT_VITALS_LIMIT_FILE ?? (IS_MAC ? "" : "E:\\local-compute\\limit.json");
+var DESKTOP_HISTORY_FILE = process.env.AGENT_VITALS_DESKTOP_USAGE_FILE ?? (IS_MAC ? path3.join(os.homedir(), "Library", "Application Support", "Claude", "plan-usage-history.json") : path3.join(process.env.APPDATA ?? "", "Claude", "plan-usage-history.json"));
 var limitClaudeFresh = () => !!state.limit?.claude && Date.now() - state.limit.claude.at < 15 * 6e4;
+var WEB_USAGE_FILE = process.env.AGENT_VITALS_WEB_USAGE_FILE ?? (IS_MAC ? "" : "E:\\local-compute\\claude-web-usage.json");
+function applyWebUsage(raw, at) {
+  if (!Number.isFinite(at) || !raw || typeof raw !== "object" || at <= state.usageAt) return false;
+  if (!raw.five_hour && !Array.isArray(raw.limits)) return false;
+  state.usage = usageFromJson(raw);
+  state.usageErr = null;
+  state.usageAt = at;
+  const fp5 = state.usage.fiveHour?.pct;
+  if (typeof fp5 === "number") state.pctHistory = [...state.pctHistory.filter((h) => at - h.t < 36e5 && h.t < at), { t: at, pct: fp5 }];
+  return true;
+}
+async function pollWebUsage() {
+  if (!WEB_USAGE_FILE) return false;
+  let m;
+  try {
+    m = JSON.parse(await fsp.readFile(WEB_USAGE_FILE, "utf8"));
+  } catch {
+    return false;
+  }
+  return applyWebUsage(m?.raw, Number(m?.at));
+}
+var USAGE_TOKEN_FILE = path3.join(os.homedir(), ".agent-vitals", "usage-push-token");
+function usagePushToken() {
+  try {
+    const t2 = fs.readFileSync(USAGE_TOKEN_FILE, "utf8").trim();
+    if (t2.length >= 32) return t2;
+  } catch {
+  }
+  const t = randomBytes(24).toString("hex");
+  try {
+    fs.mkdirSync(path3.dirname(USAGE_TOKEN_FILE), { recursive: true });
+    fs.writeFileSync(USAGE_TOKEN_FILE, t + "\n", { mode: 384 });
+  } catch {
+  }
+  return t;
+}
+function onUsagePush(payload) {
+  const at = Date.now();
+  if (!applyWebUsage(payload?.raw, at)) return false;
+  if (WEB_USAGE_FILE) {
+    try {
+      fs.writeFileSync(WEB_USAGE_FILE, JSON.stringify({ at, raw: payload.raw }));
+    } catch (e) {
+      log("usage mirror write failed:", String(e.message ?? e));
+    }
+  }
+  renderAll(["usage-session", "usage-weekly", "usage-model", "burn-rate"]);
+  return true;
+}
 async function pollLimitFile() {
-  if (!LIMIT_FILE) return;
+  const webNew = await pollWebUsage();
+  if (!LIMIT_FILE) {
+    if (webNew) renderAll(["usage-session", "usage-weekly", "usage-model", "burn-rate"]);
+    return;
+  }
   let parsed;
   try {
     parsed = parseLimitFile(JSON.parse(await fsp.readFile(LIMIT_FILE, "utf8")));
   } catch {
     return;
   }
+  let c = parsed.claude;
+  if (DESKTOP_HISTORY_FILE) {
+    let d = null;
+    try {
+      d = parseDesktopHistory(JSON.parse(await fsp.readFile(DESKTOP_HISTORY_FILE, "utf8")));
+    } catch {
+    }
+    if (d && (!c || d.at > c.at)) c = { ...d, week: d.week ?? c?.week ?? null, resetsAt: c?.resetsAt ?? null };
+  }
   const before = JSON.stringify(state.limit);
-  state.limit = { claude: parsed.claude, codex: parsed.codex };
-  const c = parsed.claude;
+  state.limit = { claude: c, codex: parsed.codex };
   if (c && c.at > state.usageAt) {
     const prev = state.usage ?? {};
     state.usage = { ...prev, fiveHour: { pct: c.pct, resetsAt: c.resetsAt }, ...c.week != null ? { weekly: { pct: c.week, resetsAt: prev.weekly?.resetsAt ?? null } } : {} };
     state.usageErr = null;
     state.usageAt = c.at;
   }
-  if (JSON.stringify(state.limit) !== before || c) renderAll(["usage-session", "usage-weekly", "usage-model", "usage-codex", "burn-rate"]);
+  if (webNew || JSON.stringify(state.limit) !== before || c) renderAll(["usage-session", "usage-weekly", "usage-model", "usage-codex", "burn-rate"]);
+}
+function usageFromJson(j) {
+  const limits = Array.isArray(j.limits) ? j.limits : [];
+  const fromLimit = (kind) => {
+    const l = limits.find((x) => x.kind === kind);
+    return l ? { pct: l.percent, resetsAt: l.resets_at } : null;
+  };
+  const scoped = limits.find((x) => x.kind === "weekly_scoped");
+  const models = [];
+  for (const l of limits) {
+    if (l.kind !== "weekly_scoped") continue;
+    const name = l.scope?.model?.display_name;
+    if (name && typeof l.percent === "number") models.push({ name, pct: l.percent, resetsAt: l.resets_at ?? null });
+  }
+  for (const [key, name] of [["seven_day_opus", "Opus"], ["seven_day_sonnet", "Sonnet"]]) {
+    const b = pickBucket(j[key]);
+    if (b?.pct != null && !models.some((m) => m.name === name)) models.push({ name, pct: b.pct, resetsAt: b.resetsAt });
+  }
+  return {
+    fiveHour: pickBucket(j.five_hour) ?? fromLimit("session"),
+    weekly: pickBucket(j.seven_day) ?? fromLimit("weekly_all"),
+    weeklyOpus: pickBucket(j.seven_day_opus),
+    scopedPct: scoped?.percent ?? null,
+    scopedName: scoped?.scope?.model?.display_name ?? null,
+    models
+  };
 }
 async function pollUsage() {
-  if (limitClaudeFresh()) return;
+  if (limitClaudeFresh() || Date.now() - state.usageAt < 10 * 6e4) return;
   lastUsageAttempt = Date.now();
   try {
     const token = await platform.readToken();
@@ -5402,30 +5589,7 @@ async function pollUsage() {
       state.loggedRaw = true;
       log("usage raw shape:", JSON.stringify(j).slice(0, 1200));
     }
-    const limits = Array.isArray(j.limits) ? j.limits : [];
-    const fromLimit = (kind) => {
-      const l = limits.find((x) => x.kind === kind);
-      return l ? { pct: l.percent, resetsAt: l.resets_at } : null;
-    };
-    const scoped = limits.find((x) => x.kind === "weekly_scoped");
-    const models = [];
-    for (const l of limits) {
-      if (l.kind !== "weekly_scoped") continue;
-      const name = l.scope?.model?.display_name;
-      if (name && typeof l.percent === "number") models.push({ name, pct: l.percent, resetsAt: l.resets_at ?? null });
-    }
-    for (const [key, name] of [["seven_day_opus", "Opus"], ["seven_day_sonnet", "Sonnet"]]) {
-      const b = pickBucket(j[key]);
-      if (b?.pct != null && !models.some((m) => m.name === name)) models.push({ name, pct: b.pct, resetsAt: b.resetsAt });
-    }
-    state.usage = {
-      fiveHour: pickBucket(j.five_hour) ?? fromLimit("session"),
-      weekly: pickBucket(j.seven_day) ?? fromLimit("weekly_all"),
-      weeklyOpus: pickBucket(j.seven_day_opus),
-      scopedPct: scoped?.percent ?? null,
-      scopedName: scoped?.scope?.model?.display_name ?? null,
-      models
-    };
+    state.usage = usageFromJson(j);
     state.usageErr = null;
     state.usageAt = Date.now();
     const fp5 = state.usage.fiveHour?.pct;
@@ -5527,6 +5691,41 @@ async function dropRecycledPids(sessions) {
   for (const k of pidVerdict.keys()) if (!live.has(k)) pidVerdict.delete(k);
   return sessions.filter((s) => pidVerdict.get(verdictKey(s)) !== false);
 }
+var desktopTitles = /* @__PURE__ */ new Map();
+async function desktopTitle(id) {
+  if (!id) return null;
+  let rec = desktopTitles.get(id);
+  if (!rec) {
+    for (const a of await fsp.readdir(DESKTOP_SESSIONS_DIR).catch(() => [])) {
+      for (const o of await fsp.readdir(path3.join(DESKTOP_SESSIONS_DIR, a)).catch(() => [])) {
+        const f = path3.join(DESKTOP_SESSIONS_DIR, a, o, id + ".json");
+        if (fs.existsSync(f)) rec = { file: f, mtime: 0, title: null };
+      }
+    }
+    if (!rec) return null;
+    desktopTitles.set(id, rec);
+  }
+  try {
+    const mt = (await fsp.stat(rec.file)).mtimeMs;
+    if (mt !== rec.mtime) {
+      rec.mtime = mt;
+      rec.title = String(JSON.parse(await fsp.readFile(rec.file, "utf8")).title ?? "").trim() || null;
+    }
+  } catch {
+  }
+  return rec.title;
+}
+var threadTitles = /* @__PURE__ */ new Map();
+async function projectThreadTitle(s) {
+  const c = threadTitles.get(s.sessionId);
+  if (c && Date.now() - c.at < 6e4) return c.title;
+  await transcriptMtime(s);
+  const dir = transcriptDirFor.get(s.sessionId);
+  let title = null;
+  if (dir) title = threadTitle(await fsp.readFile(path3.join(dir, `${s.sessionId}.jsonl`), "utf8").catch(() => ""));
+  threadTitles.set(s.sessionId, { at: Date.now(), title });
+  return title;
+}
 async function pollSessions() {
   try {
     const files = await fsp.readdir(SESSIONS_DIR).catch(() => []);
@@ -5540,6 +5739,10 @@ async function pollSessions() {
       }
     }
     out = await dropRecycledPids(out);
+    for (const s of out) {
+      s.title = await desktopTitle(s.hostSessionId);
+      if (!s.title || GENERIC_TITLE.test(s.title)) s.title = await projectThreadTitle(s) ?? null;
+    }
     out.sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0));
     for (const s of out) {
       if (s.status) continue;
@@ -5626,6 +5829,7 @@ function onHookRequest(payload, ticket) {
     statusSnapshot: null,
     activitySnapshot: null,
     baselined: false,
+    title: state.sessions.find((s) => s.sessionId === payload.session_id)?.title ?? null,
     ticket
   };
   ticket.id = req.id;
@@ -5694,6 +5898,8 @@ async function ensureHookServerOnce() {
       secret,
       onRequest: onHookRequest,
       onDrop: onHookDrop,
+      usageSecret: usagePushToken(),
+      onUsage: onUsagePush,
       log
     });
     if (previous && state.approveQueue.length) {
@@ -6013,6 +6219,16 @@ function focusTarget(s) {
   const name = String(s.name ?? "").replace(/["'‘’“”]/g, "").slice(0, 40);
   return (name || path3.basename(s.cwd ?? "")).toLowerCase();
 }
+function focusDesktop() {
+  const ps = `
+Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public class W { [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h); [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int c); [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h); }';
+$p = Get-Process Claude -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1;
+if (-not $p) { exit 1 };
+$h = $p.MainWindowHandle; if ([W]::IsIconic($h)) { [void][W]::ShowWindow($h, 9) }; [void][W]::SetForegroundWindow($h); exit 0`;
+  return new Promise((resolve2, reject) => {
+    execFile("powershell.exe", ["-NoProfile", "-WindowStyle", "Hidden", "-Command", ps], (err) => err ? reject(err) : resolve2());
+  });
+}
 var winPlatform = {
   launchDesktop() {
     return spawnDetached("explorer.exe", [desktopAppId]);
@@ -6049,6 +6265,9 @@ ${enter ? "Start-Sleep -Milliseconds 200; P 0x0D; R 0x0D;" : ""}`;
   // Bring the session's terminal window to front by title substring (verbatim
   // EnumWindows/SetForegroundWindow). execFile gives a real exit code.
   focusWindow(s) {
+    if (s?.entrypoint === "claude-desktop") {
+      return /^local_[A-Za-z0-9-]+$/.test(s.hostSessionId ?? "") ? spawnDetached("cmd.exe", ["/c", "start", "", `claude://code/continue?session=${s.hostSessionId}`]) : focusDesktop();
+    }
     const target = focusTarget(s);
     if (!target) return Promise.reject(new Error("no focus target"));
     const ps = `

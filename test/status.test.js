@@ -421,3 +421,22 @@ test("sessionSig changes when a request arrives, so the key repaints", () => {
   const after = sessionSig(sessions, NOW, new Map([["v1", NOW]]), PEND());
   assert.notEqual(before, after);
 });
+
+test("threadTitle: rename_thread wins, else the first non-boilerplate note sentence", async () => {
+  const { threadTitle, GENERIC_TITLE } = await import("../src/status.js");
+  const note = JSON.stringify({ content: "<note>\n Read-only check, change nothing. Fix the \"export\" button on Safari. More.</note>" });
+  assert.equal(threadTitle(note), 'Fix the "export" button on Safari');
+  const renamed = note + "\n" + JSON.stringify({ type: "tool_use", name: "mcp__hearthbot__rename_thread", input: { title: "Fix Safari export" } });
+  assert.equal(threadTitle(renamed), "Fix Safari export");
+  assert.equal(threadTitle("nothing here"), null);
+  assert.ok(GENERIC_TITLE.test("Local session (from a project)"));
+});
+
+test("sessions waiting over 2h drop off the Status and Waiting keys", async () => {
+  const { resolveStatusKey, blockedSessions } = await import("../src/status.js");
+  const now = 10 * 3_600_000;
+  const old = { pid: 1, sessionId: "a", cwd: "/x/old", status: "waiting", statusUpdatedAt: now - 3 * 3_600_000, updatedAt: now - 3 * 3_600_000 };
+  const fresh = { pid: 2, sessionId: "b", cwd: "/x/new", status: "waiting", statusUpdatedAt: now - 60_000, updatedAt: now - 60_000 };
+  assert.deepEqual(resolveStatusKey([old, fresh], "", 0, now).list.map((e) => e.name), ["new"]);
+  assert.deepEqual(blockedSessions([old, fresh], now).map((s) => s.pid), [2]);
+});

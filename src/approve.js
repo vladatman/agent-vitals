@@ -89,7 +89,7 @@ function targetOf(req) {
 
 export function describeRequest(req) {
   return {
-    name: cut(base(req?.cwd), NAME_MAX),
+    name: cut(req?.title || base(req?.cwd), NAME_MAX),
     target: cut(targetOf(req), TARGET_MAX),
   };
 }

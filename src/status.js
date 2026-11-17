@@ -137,8 +137,17 @@ const rank = (s, now, activity, pending) => URGENCY[sessionState(s, now, actOf(s
 
 // Sessions blocked on the human, most urgent first. Returns the *full* poller
 // records (callers pass them to platform.focusWindow, which needs `pid`).
+// A session blocked on you for over 2h is a forgotten thread, not a live ask: keep it
+// off the keys so they show what needs you now (it still waits in Claude Desktop).
+export const STALE_WAIT_MS = 2 * 3_600_000;
+export function staleWait(s, now = Date.now(), pending = null) {
+  const since = s?.status === "waiting" && s.statusUpdatedAt ? s.statusUpdatedAt : (pendOf(s, pending)?.since ?? null);
+  return since != null && now - since > STALE_WAIT_MS;
+}
+
 export function blockedSessions(sessions, now = Date.now(), activity = null, pending = null) {
   return (sessions ?? [])
+    .filter((s) => !staleWait(s, now, pending))
     .filter((s) => rank(s, now, activity, pending) <= URGENCY["input-needed"])
     .sort((a, b) => rank(a, now, activity, pending) - rank(b, now, activity, pending) || (b.updatedAt ?? 0) - (a.updatedAt ?? 0) || (a.pid ?? 0) - (b.pid ?? 0));
 }
@@ -215,7 +224,7 @@ export function resolveStatusKey(sessions, project, autoIdx = 0, now = Date.now(
   const explicit = !!(project && String(project).trim());
   const want = explicit ? String(project).trim().toLowerCase() : null;
   const list = (sessions ?? [])
-    .filter((s) => (explicit ? sessionProject(s) === want : true))
+    .filter((s) => (explicit ? sessionProject(s) === want : true) && !staleWait(s, now, pending))
     .sort((a, b) => byDisplayOrder(a, b, now, activity, pending))
     .map((s) => {
       // A VS Code session has no waitingFor or statusUpdatedAt of its own, so the held
@@ -223,7 +232,7 @@ export function resolveStatusKey(sessions, project, autoIdx = 0, now = Date.now(
       // key would read a bare "needs you" and pulse forever with no age.
       const p = pendOf(s, pending);
       return {
-        name: path.basename(s.cwd ?? "") || "claude",
+        name: s.title || path.basename(s.cwd ?? "") || "claude",
         state: sessionState(s, now, actOf(s, activity), p?.kind ?? null),
         waitingFor: s.status === "waiting" ? String(s.waitingFor ?? "permission prompt") : (p?.reason ?? ""),
         // null when the session reports no timestamp at all (VS Code) — otherwise
@@ -252,3 +261,22 @@ export function statusEntry(resolved, cycleIdx = null) {
   return resolved.list[i] ?? { name: "", state: "none", waitingFor: "", statusAge: 0, waitingSince: null, cwd: "", sessionId: null, pid: null, where: "" };
 }
 
+
+// A session started from a claude.ai project gets the generic Desktop title
+// "Local session (from a project)". Its real name lives only in its transcript:
+// the last rename_thread title, else the first sentence of the task note it was
+// spawned with. null when neither is there.
+export const GENERIC_TITLE = /^local session\b/i;
+export function threadTitle(jsonl) {
+  const t = String(jsonl ?? "");
+  // Both live inside JSON strings, so match escaped text and let JSON.parse unescape it.
+  const renames = [...t.matchAll(/"name":"mcp__hearthbot__rename_thread","input":\{"title":"((?:[^"\\]|\\.)*)"/g)];
+  if (renames.length) return JSON.parse(`"${renames.at(-1)[1]}"`).trim() || null;
+  const note = t.match(/<note>((?:[^<"\\]|\\.)*)/);
+  if (!note) return null;
+  const text = JSON.parse(`"${note[1]}"`).replace(/\s+/g, " ").trim();
+  // Skip the boilerplate openers coordinators use ("Read-only check, change nothing.").
+  const parts = text.split(/(?<=[.!?])\s/).map((p) => p.replace(/^(goal|task|цель|задача):\s*/i, ""));
+  const pick = parts.find((p) => !/^(read-only|просьба|change nothing|no deploys)/i.test(p)) ?? parts[0];
+  return pick.replace(/[.!?]$/, "").slice(0, 40).trim() || null;
+}

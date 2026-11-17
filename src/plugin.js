@@ -10,7 +10,7 @@ import { spawn, execFile } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { escapeAppleScript, parseHotkey, hotkeyClause, classifyCustomCommand, parseKeychainToken, parsePsTree, hostAppForPid, focusStrategyForBundle, terminalFocusScript, parseProcStarts } from "./osa.js";
 import { parseLimitFile, parseDesktopHistory, LIMIT_FRESH_MS, windowStartMs, parseRequests, mergeById, aggregate, aggregateByModel, budgetPct, localDay, newDayCounts, foldDayChunk, dayCountsTotals } from "./usage.js";
-import { resolveStatusKey, statusEntry, autoSlot, sessionState, blockedSessions, sessionSig, transcriptPathFor, pidLooksRecycled } from "./status.js";
+import { resolveStatusKey, statusEntry, autoSlot, sessionState, blockedSessions, sessionSig, transcriptPathFor, pidLooksRecycled, GENERIC_TITLE, threadTitle } from "./status.js";
 import { randomBytes } from "node:crypto";
 import {
   decisionBody, alwaysRule, pressDecision,
@@ -32,6 +32,8 @@ const CLAUDE_DIR = path.join(os.homedir(), ".claude");
 const CREDS_FILE = path.join(CLAUDE_DIR, ".credentials.json");
 const SESSIONS_DIR = path.join(CLAUDE_DIR, "sessions");
 const PROJECTS_DIR = path.join(CLAUDE_DIR, "projects");
+// Claude Desktop keeps one JSON per Code-tab session (title, worktree) under here.
+const DESKTOP_SESSIONS_DIR = path.join(process.env.APPDATA ?? path.join(os.homedir(), "AppData", "Roaming"), "Claude", "claude-code-sessions");
 const USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
 const githubDir = path.join(os.homedir(), "Documents", "GitHub");
 const DEFAULT_CODE_DIR = fs.existsSync(githubDir) ? githubDir : os.homedir();
@@ -350,6 +352,47 @@ async function dropRecycledPids(sessions) {
   return sessions.filter((s) => pidVerdict.get(verdictKey(s)) !== false);
 }
 
+// hostSessionId -> { file, mtime, title }. A Desktop session's cwd is a random worktree
+// ("blissful-bhabha-378657"), so its human title is the only name worth showing.
+const desktopTitles = new Map();
+async function desktopTitle(id) {
+  if (!id) return null;
+  let rec = desktopTitles.get(id);
+  if (!rec) {
+    // Two levels (<account>/<org>/<id>.json); readdir only on a miss.
+    for (const a of await fsp.readdir(DESKTOP_SESSIONS_DIR).catch(() => [])) {
+      for (const o of await fsp.readdir(path.join(DESKTOP_SESSIONS_DIR, a)).catch(() => [])) {
+        const f = path.join(DESKTOP_SESSIONS_DIR, a, o, id + ".json");
+        if (fs.existsSync(f)) rec = { file: f, mtime: 0, title: null };
+      }
+    }
+    if (!rec) return null;
+    desktopTitles.set(id, rec);
+  }
+  try {
+    const mt = (await fsp.stat(rec.file)).mtimeMs;
+    if (mt !== rec.mtime) {
+      rec.mtime = mt;
+      rec.title = String(JSON.parse(await fsp.readFile(rec.file, "utf8")).title ?? "").trim() || null;
+    }
+  } catch {}
+  return rec.title;
+}
+
+// sessionId -> { at, title }: a project-thread title read from the transcript at most
+// once a minute (transcripts reach MBs; the title rarely changes).
+const threadTitles = new Map();
+async function projectThreadTitle(s) {
+  const c = threadTitles.get(s.sessionId);
+  if (c && Date.now() - c.at < 60_000) return c.title;
+  await transcriptMtime(s); // fills transcriptDirFor
+  const dir = transcriptDirFor.get(s.sessionId);
+  let title = null;
+  if (dir) title = threadTitle(await fsp.readFile(path.join(dir, `${s.sessionId}.jsonl`), "utf8").catch(() => ""));
+  threadTitles.set(s.sessionId, { at: Date.now(), title });
+  return title;
+}
+
 async function pollSessions() {
   try {
     const files = await fsp.readdir(SESSIONS_DIR).catch(() => []);
@@ -364,6 +407,10 @@ async function pollSessions() {
     // Before anything derives from this list — including the approver's staleness
     // baselines below — discard sessions whose pid was recycled after a crash.
     out = await dropRecycledPids(out);
+    for (const s of out) {
+      s.title = await desktopTitle(s.hostSessionId);
+      if (!s.title || GENERIC_TITLE.test(s.title)) s.title = (await projectThreadTitle(s)) ?? null;
+    }
     out.sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0));
     // The VS Code extension writes no status at all, so for those sessions only,
     // stat the transcript to tell "mid-turn" from "idle". One stat per such
@@ -495,6 +542,7 @@ function onHookRequest(payload, ticket) {
     statusSnapshot: null,
     activitySnapshot: null,
     baselined: false,
+    title: state.sessions.find((s) => s.sessionId === payload.session_id)?.title ?? null,
     ticket,
   };
   ticket.id = req.id;
@@ -969,6 +1017,17 @@ function focusTarget(s) {
   return (name || path.basename(s.cwd ?? "")).toLowerCase();
 }
 
+function focusDesktop() {
+  const ps = `
+Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public class W { [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h); [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int c); [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h); }';
+$p = Get-Process Claude -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1;
+if (-not $p) { exit 1 };
+$h = $p.MainWindowHandle; if ([W]::IsIconic($h)) { [void][W]::ShowWindow($h, 9) }; [void][W]::SetForegroundWindow($h); exit 0`;
+  return new Promise((resolve, reject) => {
+    execFile("powershell.exe", ["-NoProfile", "-WindowStyle", "Hidden", "-Command", ps], (err) => (err ? reject(err) : resolve()));
+  });
+}
+
 const winPlatform = {
   launchDesktop() { return spawnDetached("explorer.exe", [desktopAppId]); },
   openUrl(url) { return spawnDetached("cmd.exe", ["/c", "start", "", url]); },
@@ -1002,6 +1061,15 @@ ${enter ? "Start-Sleep -Milliseconds 200; P 0x0D; R 0x0D;" : ""}`;
   // Bring the session's terminal window to front by title substring (verbatim
   // EnumWindows/SetForegroundWindow). execFile gives a real exit code.
   focusWindow(s) {
+    // A Desktop (Code tab) session has no window of its own: the Claude app is where
+    // it waits, so focus the app's main window instead of alerting on "not found".
+    // Claude Desktop's own deep link opens THAT session (with its pending prompt) and
+    // shows the window; same link the app's "Continue session" entry point uses.
+    if (s?.entrypoint === "claude-desktop") {
+      return /^local_[A-Za-z0-9-]+$/.test(s.hostSessionId ?? "")
+        ? spawnDetached("cmd.exe", ["/c", "start", "", `claude://code/continue?session=${s.hostSessionId}`])
+        : focusDesktop();
+    }
     const target = focusTarget(s);
     if (!target) return Promise.reject(new Error("no focus target"));
     const ps = `
